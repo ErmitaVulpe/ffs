@@ -1,0 +1,13 @@
+[package]
+name = "ffs_daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bimap = "0.6.3"
+bitflags = "2.8.0"
+bytemuck = { version = "1.21.0", features = ["derive"] }
+clap = { version = "4.5.27", features = ["cargo", "env", "wrap_help"] }
+postcard = "1.1.3"
+redb = "2.4.0"
+tokio = "1.52.1"
