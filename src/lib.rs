@@ -1,3 +1,4 @@
+mod backend;
 mod db;
 
 pub use db::{InodeMeta, InodePath, InodePathParseError};

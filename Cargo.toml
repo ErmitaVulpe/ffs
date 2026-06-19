@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+async-trait = "0.1.89"
 bimap = "0.6.3"
 bitflags = "2.13.0"
 bytemuck = { version = "1.25.0", features = ["derive"] }

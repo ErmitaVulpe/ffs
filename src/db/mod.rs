@@ -10,7 +10,7 @@ use crate::db::types::{
 
 mod types;
 
-pub use types::InodeMeta;
+pub use types::{BackendKind, BackendId, ChunkId, InodeMeta};
 
 pub struct Db {
     redb: redb::Database,
@@ -94,6 +94,11 @@ impl Db {
                         .map(|v| (id, v))
                 })
             }))
+    }
+
+    /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
+    pub fn compact(&mut self) -> Result<bool, redb::CompactionError> {
+        self.redb.compact()
     }
 
     /// Maps the `InodePath` to a `InodeId`, returns `Ok(None)` if no such file exists

@@ -32,7 +32,9 @@ impl Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    #[command(short_flag = 'R')]
+    #[command(about = "Try to compact the database file")]
+    Compact,
+    #[command(about = "Execute a command directly on the database", short_flag = 'R')]
     Run {
         #[command(subcommand)]
         command: RunSubCommand,
@@ -40,8 +42,12 @@ enum Command {
 }
 
 impl Command {
-    fn run(self, app: App) -> anyhow::Result<()> {
+    fn run(self, mut app: App) -> anyhow::Result<()> {
         match self {
+            Command::Compact => {
+                app.db.compact().map_err(anyhow::Error::from)?;
+                Ok(())
+            }
             Command::Run { command } => command.run(app),
         }
     }
@@ -49,11 +55,11 @@ impl Command {
 
 #[derive(Debug, Subcommand)]
 enum RunSubCommand {
-    #[command(short_flag = 'l')]
+    #[command(about = "List directory contents", short_flag = 'l')]
     Ls { path: Option<InodePath> },
-    #[command(short_flag = 'm')]
+    #[command(about = "Create a new directory", short_flag = 'm')]
     Mkdir { path: InodePath },
-    #[command(short_flag = 'r')]
+    #[command(about = "Remove a file or directory", short_flag = 'r')]
     Rm { path: InodePath },
 }
 

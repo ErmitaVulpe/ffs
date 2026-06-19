@@ -1,5 +1,6 @@
 use bytemuck::{Pod, Zeroable, bytes_of, from_bytes};
 use compactly::Encode;
+use derive_more::Display;
 use redb::{MultimapTableDefinition, TableDefinition, TypeName, Value};
 
 /// Id of the backend instance
@@ -26,7 +27,7 @@ pub const INODE_RELATION_PARENT: TableDefinition<InodeId, InodeId> =
 
 pub const METADATA: TableDefinition<u8, &[u8]> = TableDefinition::new("METADATA");
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Encode, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BackendMeta {
     pub free: u64,
     pub total: u64,
@@ -34,10 +35,13 @@ pub struct BackendMeta {
     pub kind: BackendKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Display, Encode, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum BackendKind {
     /// Dummy backend which stores chunks as files at the given path
-    Dummy(String),
+    #[cfg(debug_assertions)]
+    #[display("Dummy")]
+    Dummy(String) = 0,
 }
 
 #[repr(C)]
