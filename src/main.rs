@@ -1,6 +1,5 @@
-use anyhow::Context;
 use clap::{Parser, Subcommand};
-use ffs::{App, InodeMeta, InodePath};
+use ffs::{App, InodePath};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -45,7 +44,7 @@ impl Command {
     fn run(self, mut app: App) -> anyhow::Result<()> {
         match self {
             Command::Compact => {
-                app.db.compact().map_err(anyhow::Error::from)?;
+                app.compact_db().map_err(anyhow::Error::from)?;
                 Ok(())
             }
             Command::Run { command } => command.run(app),
@@ -68,33 +67,15 @@ impl RunSubCommand {
         match self {
             RunSubCommand::Ls { path } => {
                 let path = path.unwrap_or_default();
-                let inode = app.db.inode_lookup(&path)?.context("Directory not found")?;
-
-                for child in app.db.iter_children(inode)? {
+                for child in app.read_dir(&path)? {
                     let (_, meta) = child?;
                     println!("{}", meta.name);
                 }
 
                 Ok(())
             }
-            RunSubCommand::Mkdir { mut path } => {
-                let name = path.pop().context("No directory name specified")?;
-                let inode = InodeMeta::new_directory(name);
-                let parent_inode = app
-                    .db
-                    .inode_lookup(&path)?
-                    .context("Parent directory doesnt exist")?;
-                app.db.create_inode(parent_inode, inode)?;
-                Ok(())
-            }
-            RunSubCommand::Rm { path } => {
-                let inode = app
-                    .db
-                    .inode_lookup(&path)?
-                    .context("File or directory not found")?;
-                app.db.remove_inode(inode)?;
-                Ok(())
-            }
+            RunSubCommand::Mkdir { path } => app.mkdir(path),
+            RunSubCommand::Rm { path } => app.rm(&path),
         }
     }
 }
