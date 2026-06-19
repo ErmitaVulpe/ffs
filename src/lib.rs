@@ -1,5 +1,6 @@
 mod backend;
 mod db;
+mod splitter;
 
 use anyhow::Context;
 pub use db::{InodeMeta, InodePath, InodePathParseError};
