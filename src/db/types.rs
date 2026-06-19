@@ -12,6 +12,8 @@ pub type ChunkId = u64;
 pub const BACKENDS: TableDefinition<BackendId, &[u8]> = TableDefinition::new("BACKENDS");
 /// Chunks making up the inodes
 pub const CHUNKS: TableDefinition<ChunkId, ChunkData> = TableDefinition::new("CHUNKS");
+pub const CHUNKS_TO_DROP: MultimapTableDefinition<(), ChunkId> =
+    MultimapTableDefinition::new("CHUNKS_TO_DROP");
 /// Metadata of an inode. Contains encoded `InodeMeta`
 pub const INODES: TableDefinition<InodeId, &[u8]> = TableDefinition::new("INODES");
 pub const CHUNKS_OF_INODES: MultimapTableDefinition<InodeId, ChunkId> =

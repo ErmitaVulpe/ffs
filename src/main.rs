@@ -25,7 +25,6 @@ struct Args {
 
 impl Args {
     fn run(self) -> anyhow::Result<()> {
-        println!("{self:#?}");
         let app = App::new(self.db_path)?;
         self.command.run(app)
     }
@@ -55,7 +54,7 @@ enum RunSubCommand {
     #[command(short_flag = 'm')]
     Mkdir { path: InodePath },
     #[command(short_flag = 'r')]
-    Rmdir { path: InodePath },
+    Rm { path: InodePath },
 }
 
 impl RunSubCommand {
@@ -82,7 +81,14 @@ impl RunSubCommand {
                 app.db.create_inode(parent_inode, inode)?;
                 Ok(())
             }
-            RunSubCommand::Rmdir { path } => todo!(),
+            RunSubCommand::Rm { path } => {
+                let inode = app
+                    .db
+                    .inode_lookup(&path)?
+                    .context("File or directory not found")?;
+                app.db.remove_inode(inode)?;
+                Ok(())
+            }
         }
     }
 }

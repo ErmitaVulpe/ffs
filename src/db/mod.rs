@@ -1,10 +1,11 @@
 use std::{path::Path, str::FromStr};
 
 use derive_more::{Display, Error, From};
-use redb::{ReadableDatabase, ReadableTable};
+use redb::{ReadableDatabase, ReadableMultimapTable, ReadableTable};
 
 use crate::db::types::{
-    INODE_RELATION_CHILDREN, INODE_RELATION_PARENT, INODES, InodeId, METADATA, Metadata,
+    CHUNKS_OF_INODES, CHUNKS_TO_DROP, INODE_RELATION_CHILDREN, INODE_RELATION_PARENT, INODES,
+    InodeFlags, InodeId, METADATA, Metadata,
 };
 
 mod types;
@@ -174,6 +175,56 @@ impl Db {
 
         Ok(new_inode_id)
     }
+
+    pub fn remove_inode(&self, inode: InodeId) -> Result<(), RemoveInodeError> {
+        let txn = self.redb.begin_write()?;
+
+        {
+            let mut inodes = txn.open_table(INODES)?;
+            let meta = compactly::decode::<InodeMeta>(
+                inodes
+                    .get(inode)?
+                    .ok_or(RemoveInodeError::NotFound)?
+                    .value(),
+            )
+            .ok_or(RemoveInodeError::Corrupted)?;
+
+            match meta.inode_flags.contains(InodeFlags::IS_FILE) {
+                true => {
+                    if meta.size != 0 {
+                        let mut chunks_of_inodes = txn.open_multimap_table(CHUNKS_OF_INODES)?;
+                        let mut chunks_to_drop = txn.open_multimap_table(CHUNKS_TO_DROP)?;
+                        let res = chunks_of_inodes
+                            .remove_all(inode)?
+                            .map(|r| r.and_then(|cid| chunks_to_drop.insert((), cid.value())))
+                            .try_fold(false, |acc, r| Ok::<bool, redb::StorageError>(acc || r?))?;
+                        debug_assert!(!res);
+
+                        todo!("This needs to spawn the cleanup");
+                    }
+                }
+                false => {
+                    let children = txn.open_multimap_table(INODE_RELATION_CHILDREN)?;
+                    if !children.get(inode)?.is_empty() {
+                        return Err(RemoveInodeError::HasChildren);
+                    }
+                }
+            }
+
+            inodes.remove(inode)?;
+            let parent_id = txn
+                .open_table(INODE_RELATION_PARENT)?
+                .remove(inode)?
+                .ok_or(RemoveInodeError::Corrupted)?
+                .value();
+            let mut relation_children = txn.open_multimap_table(INODE_RELATION_CHILDREN)?;
+            let res = relation_children.remove(parent_id, inode)?;
+            debug_assert!(res);
+        }
+
+        txn.commit()?;
+        Ok(())
+    }
 }
 
 macro_rules! impl_from_redb {
@@ -204,7 +255,7 @@ impl_from_redb!(
 );
 
 #[derive(Debug, Display, Error, From)]
-#[display("Failed to find the file")]
+#[display("Failed to create a new inode")]
 pub enum CreateInodeError {
     Db(redb::Error),
     #[display("Specified parent doesnt exist")]
@@ -221,6 +272,26 @@ pub enum CreateInodeError {
 
 impl_from_redb!(
     CreateInodeError => Db,
+    redb::CommitError,
+    redb::StorageError,
+    redb::TableError,
+    redb::TransactionError,
+);
+
+#[derive(Debug, Display, Error, From)]
+#[display("Failed to create a new inode")]
+pub enum RemoveInodeError {
+    Db(redb::Error),
+    #[display("Db is corrupted")]
+    Corrupted,
+    #[display("Attempted to remove a non existing inode")]
+    NotFound,
+    #[display("Attempted to remove a non empty directory")]
+    HasChildren,
+}
+
+impl_from_redb!(
+    RemoveInodeError => Db,
     redb::CommitError,
     redb::StorageError,
     redb::TableError,
