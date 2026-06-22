@@ -12,9 +12,6 @@ mod types;
 
 pub use types::{BackendKind, BackendId, ChunkId, InodeMeta};
 
-/// 4MiB
-pub const DEFAULT_CHUNK_SIZE: u32 = 1 << 22;
-
 pub struct Db {
     redb: redb::Database,
 }
