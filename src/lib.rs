@@ -2,23 +2,72 @@ mod backend;
 mod db;
 mod splitter;
 
-use anyhow::Context;
-pub use db::{InodeMeta, InodePath, InodePathParseError};
+use std::{collections::HashMap, sync::Arc};
 
-use crate::db::LookupError;
+use anyhow::Context;
+pub use db::{BackendKindSpecifier, BackendParseError, InodeMeta, InodePath, InodePathParseError};
+use tokio::sync::RwLock;
+
+use crate::{
+    backend::Backend,
+    db::{BackendId, BackendMeta, ListBackendsError, LookupError},
+};
 
 pub struct App {
+    backends: RwLock<HashMap<BackendId, Arc<dyn Backend>>>,
     db: db::Db,
 }
 
 impl App {
     pub fn new(db_path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let db = db::Db::new(db_path)?;
-        Ok(Self { db })
+        let backends = RwLock::new(HashMap::new());
+        Ok(Self { backends, db })
+    }
+
+    pub async fn add_backend(&self, kind: BackendKindSpecifier) -> anyhow::Result<()> {
+        let init_data = backend::generate_backend(kind)
+            .await
+            .context("Failed to generate new backend data")?;
+
+        let id = self.db.new_backend_id()?;
+        let instance = backend::init(id, init_data.clone()).await?;
+        let stat = instance
+            .stat()
+            .await
+            .context("Failed to get stats of the new backend. Aborting")?;
+
+        // Upload a marker chunk, if this fails, this backend is a duplicate
+        instance.upload(0, &[]).await?;
+
+        {
+            let mut lock = self.backends.write().await;
+            let res = lock.insert(id, instance);
+            debug_assert!(res.is_none());
+        }
+
+        let meta = BackendMeta {
+            total: stat.total,
+            free: stat.total - stat.used,
+            kind: init_data,
+            chunks_contained: 0,
+        };
+
+        self.db.add_backend(id, meta)?;
+        Ok(())
     }
 
     pub fn compact_db(&mut self) -> Result<bool, redb::CompactionError> {
         self.db.compact()
+    }
+
+    pub fn list_backends(
+        &self,
+    ) -> Result<
+        impl Iterator<Item = Result<(BackendId, BackendMeta), ListBackendsError>>,
+        ListBackendsError,
+    > {
+        self.db.list_backends()
     }
 
     pub fn read_dir(

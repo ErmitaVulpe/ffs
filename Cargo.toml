@@ -12,5 +12,8 @@ bytemuck = { version = "1.25.0", features = ["derive"] }
 clap = { version = "4.6.1", features = ["cargo", "derive", "env", "wrap_help"] }
 compactly = { version = "0.1.6", default-features = false, features = ["v2"] }
 derive_more = { version = "2.1.1", features = ["full"] }
+indoc = "2.0.7"
+inquire = "0.9.4"
 redb = "4.1.0"
+tabled = "0.21.0"
 tokio = { version = "1.52.3", features = ["full"] }

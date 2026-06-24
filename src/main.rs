@@ -1,9 +1,11 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
-use ffs::{App, InodePath};
+use ffs::{App, BackendKindSpecifier, InodePath};
+use indoc::indoc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    Args::parse().run()
+    Args::parse().run().await
 }
 
 #[derive(Debug, Parser)]
@@ -23,14 +25,19 @@ struct Args {
 }
 
 impl Args {
-    fn run(self) -> anyhow::Result<()> {
+    async fn run(self) -> anyhow::Result<()> {
         let app = App::new(self.db_path)?;
-        self.command.run(app)
+        self.command.run(app).await
     }
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Manage backends", short_flag = 'B')]
+    Backend {
+        #[command(subcommand)]
+        command: BackendSubCommand,
+    },
     #[command(about = "Try to compact the database file")]
     Compact,
     #[command(about = "Execute a command directly on the database", short_flag = 'R')]
@@ -41,13 +48,67 @@ enum Command {
 }
 
 impl Command {
-    fn run(self, mut app: App) -> anyhow::Result<()> {
+    async fn run(self, mut app: App) -> anyhow::Result<()> {
         match self {
+            Command::Backend { command } => command.run(app).await,
             Command::Compact => {
                 app.compact_db().map_err(anyhow::Error::from)?;
                 Ok(())
             }
             Command::Run { command } => command.run(app),
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum BackendSubCommand {
+    #[command(
+        about = "Add a new backend",
+        short_flag = 'a',
+        long_about = indoc! {"
+            Supported backends:
+            asd - fgh
+            asd - fgh
+            asd - fgh
+        "}
+    )]
+    Add {
+        #[arg(value_parser = backend_kind_parser)]
+        kind: BackendKindSpecifier,
+    },
+    #[command(about = "Show currently added backends", short_flag = 'l')]
+    List,
+}
+
+fn backend_kind_parser(s: &str) -> anyhow::Result<BackendKindSpecifier> {
+    s.parse()
+        .context("Unsupported backend. For a list of supported backends try -Ba --help")
+}
+
+impl BackendSubCommand {
+    async fn run(self, app: App) -> anyhow::Result<()> {
+        match self {
+            BackendSubCommand::Add { kind } => app.add_backend(kind).await,
+            BackendSubCommand::List => {
+                let mut table = tabled::builder::Builder::new();
+                for result in app.list_backends()? {
+                    let (id, meta) = result?;
+                    table.push_record(
+                        [
+                            id.to_string(),
+                            meta.free.to_string(),
+                            meta.total.to_string(),
+                            meta.chunks_contained.to_string(),
+                            meta.kind.to_string(),
+                        ]
+                        .iter(),
+                    );
+                }
+
+                let table = table.build();
+                println!("{table}");
+                Ok(())
+            }
         }
     }
 }

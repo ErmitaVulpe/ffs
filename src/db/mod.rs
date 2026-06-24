@@ -4,13 +4,16 @@ use derive_more::{Display, Error, From};
 use redb::{ReadableDatabase, ReadableMultimapTable, ReadableTable};
 
 use crate::db::types::{
-    CHUNKS_OF_INODES, CHUNKS_TO_DROP, INODE_RELATION_CHILDREN, INODE_RELATION_PARENT, INODES,
-    InodeFlags, InodeId, METADATA, Metadata,
+    BACKENDS, CHUNKS_OF_INODES, CHUNKS_TO_DROP, INODE_RELATION_CHILDREN, INODE_RELATION_PARENT,
+    INODES, InodeFlags, InodeId, METADATA, Metadata,
 };
 
 mod types;
 
-pub use types::{BackendKind, BackendId, ChunkId, InodeMeta};
+pub use types::{
+    BackendId, BackendKind, BackendKindSpecifier, BackendMeta, BackendParseError, ChunkId,
+    InodeMeta,
+};
 
 pub struct Db {
     redb: redb::Database,
@@ -55,7 +58,8 @@ impl Db {
                 )?;
                 metadata.insert(
                     types::Metadata::NextChunk as u8,
-                    (0 as types::ChunkId).to_le_bytes().as_slice(),
+                    // this inits at 0 is reserved for marker chunks in backends
+                    (1 as types::ChunkId).to_le_bytes().as_slice(),
                 )?;
             }
 
@@ -230,6 +234,77 @@ impl Db {
         txn.commit()?;
         Ok(())
     }
+
+    pub fn new_backend_id(&self) -> Result<BackendId, NewIdError> {
+        let txn = self.redb.begin_write()?;
+
+        let new_id = {
+            let mut meta_table = txn.open_table(METADATA)?;
+            let mut next_id_guard = meta_table
+                .get_mut(Metadata::NextBackend as u8)?
+                .ok_or(NewIdError::Corrupted)?;
+            let new_id = BackendId::from_le_bytes(
+                *next_id_guard
+                    .value()
+                    .as_array()
+                    .ok_or(NewIdError::Corrupted)?,
+            );
+            next_id_guard.insert(
+                new_id
+                    .checked_add(1)
+                    .ok_or(NewIdError::OutOfIds)?
+                    .to_le_bytes()
+                    .as_slice(),
+            )?;
+
+            new_id
+        };
+
+        txn.commit()?;
+        Ok(new_id)
+    }
+
+    pub fn add_backend(&self, id: BackendId, meta: BackendMeta) -> Result<(), AddBackendError> {
+        let txn = self.redb.begin_write()?;
+
+        let res = {
+            let mut backends_table = txn.open_table(BACKENDS)?;
+            let res = backends_table.insert(id, compactly::encode(&meta).as_slice())?;
+            if res.is_some() {
+                Err(AddBackendError::AlreadyPresent)
+            } else {
+                Ok(())
+            }
+        };
+
+        if res.is_ok() {
+            txn.commit()?;
+        } else {
+            txn.abort()?;
+        }
+        res
+    }
+
+    pub fn list_backends(
+        &self,
+    ) -> Result<
+        impl Iterator<Item = Result<(BackendId, BackendMeta), ListBackendsError>>,
+        ListBackendsError,
+    > {
+        let txn = self.redb.begin_read()?;
+        let table = txn.open_table(BACKENDS)?;
+        // .range has to be used here because it returns `Range<'static, K, V>`, and .iter returns
+        // `Range<'_, K, V>`
+        let backends = table.range(0..=u32::MAX)?.map(|e| {
+            e.map_err(ListBackendsError::from).and_then(|pair| {
+                let k = pair.0.value();
+                let v = compactly::decode::<BackendMeta>(pair.1.value())
+                    .ok_or(ListBackendsError::Corrupted)?;
+                Ok::<(BackendId, BackendMeta), ListBackendsError>((k, v))
+            })
+        });
+        Ok(backends)
+    }
 }
 
 macro_rules! impl_from_redb {
@@ -243,6 +318,24 @@ macro_rules! impl_from_redb {
         )*
     };
 }
+
+#[derive(Debug, Display, Error, From)]
+#[display("Failed to generate a new id")]
+pub enum NewIdError {
+    Db(redb::Error),
+    #[display("Db is corrupted")]
+    Corrupted,
+    #[display("Ran out if inode ids")]
+    OutOfIds,
+}
+
+impl_from_redb!(
+    NewIdError => Db,
+    redb::CommitError,
+    redb::StorageError,
+    redb::TableError,
+    redb::TransactionError,
+);
 
 #[derive(Debug, Display, Error, From)]
 #[display("Failed to find the file")]
@@ -311,6 +404,41 @@ impl From<LookupError> for CreateInodeError {
         }
     }
 }
+
+#[derive(Debug, Display, Error, From)]
+#[display("Failed to add a backend to the db")]
+pub enum AddBackendError {
+    Db(redb::Error),
+    #[display("Db is corrupted")]
+    Corrupted,
+    #[display("Ran out if inode ids")]
+    OutOfIds,
+    #[display("Backend with this id already exists")]
+    AlreadyPresent,
+}
+
+impl_from_redb!(
+    AddBackendError => Db,
+    redb::CommitError,
+    redb::StorageError,
+    redb::TableError,
+    redb::TransactionError,
+);
+
+#[derive(Debug, Display, Error, From)]
+#[display("Failed to iterate over backends")]
+pub enum ListBackendsError {
+    Db(redb::Error),
+    #[display("Failed to decode inode metadata. Db is most likely corrupted")]
+    Corrupted,
+}
+
+impl_from_redb!(
+    ListBackendsError => Db,
+    redb::StorageError,
+    redb::TableError,
+    redb::TransactionError,
+);
 
 #[derive(Clone, Debug, Default)]
 pub struct InodePath {

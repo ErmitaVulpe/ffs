@@ -1,6 +1,8 @@
+use std::str::FromStr;
+
 use bytemuck::{Pod, Zeroable, bytes_of, from_bytes};
 use compactly::Encode;
-use derive_more::Display;
+use derive_more::{Display, Error};
 use redb::{MultimapTableDefinition, TableDefinition, TypeName, Value};
 
 /// Id of the backend instance
@@ -43,6 +45,31 @@ pub enum BackendKind {
     #[display("Dummy")]
     Dummy(String) = 0,
 }
+
+#[derive(Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum BackendKindSpecifier {
+    /// Dummy backend which stores chunks as files at the given path
+    #[cfg(debug_assertions)]
+    #[display("Dummy")]
+    Dummy = 0,
+}
+
+impl FromStr for BackendKindSpecifier {
+    type Err = BackendParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let a = s.to_lowercase();
+        Ok(match a.as_str() {
+            "dummy" => Self::Dummy,
+            _ => return Err(BackendParseError),
+        })
+    }
+}
+
+#[derive(Debug, Display, Error)]
+#[display("Unsupported backend kind")]
+pub struct BackendParseError;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Zeroable, Pod)]
