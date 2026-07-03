@@ -1,18 +1,21 @@
-use std::{path::Path, str::FromStr};
+use std::{collections::HashMap, ops::RangeInclusive, path::Path, str::FromStr};
 
 use derive_more::{Display, Error, From};
 use redb::{ReadableDatabase, ReadableMultimapTable, ReadableTable};
 
-use crate::db::types::{
-    BACKENDS, CHUNKS_OF_INODES, CHUNKS_TO_DROP, INODE_RELATION_CHILDREN, INODE_RELATION_PARENT,
-    INODES, InodeFlags, InodeId, METADATA, Metadata,
+use crate::{
+    chunk_alloc::BackendStat,
+    db::types::{
+        BACKENDS, CHUNKS_OF_INODES, CHUNKS_TO_DROP, INODE_RELATION_CHILDREN, INODE_RELATION_PARENT,
+        INODES, InodeFlags, InodeId, METADATA, Metadata,
+    },
 };
 
 mod types;
 
 pub use types::{
-    BackendId, BackendKind, BackendKindSpecifier, BackendMeta, BackendParseError, ChunkId,
-    InodeMeta,
+    BackendId, BackendKind, BackendKindSpecifier, BackendMeta, BackendParseError, ChunkData,
+    ChunkId, InodeMeta,
 };
 
 pub struct Db {
@@ -34,6 +37,8 @@ impl Db {
             {
                 txn.open_table(types::BACKENDS)?;
                 txn.open_table(types::CHUNKS)?;
+                txn.open_multimap_table(types::CHUNKS_TO_DROP)?;
+                txn.open_multimap_table(types::TEMP_CHUNKS)?;
 
                 let mut inodes = txn.open_table(types::INODES)?;
                 // init root inode
@@ -69,6 +74,25 @@ impl Db {
         };
 
         Ok(Self { redb: db })
+    }
+
+    pub fn app_init_data(&self) -> Result<AppInitData, redb::Error> {
+        let backends_stat = self
+            .redb
+            .begin_read()?
+            .open_table(BACKENDS)?
+            .iter()?
+            .map(|r| {
+                r.map_err(redb::Error::from).and_then(|(k, v)| {
+                    let meta = compactly::decode::<BackendMeta>(v.value()).ok_or(
+                        redb::Error::Corrupted("Failed to read backend metadata".to_string()),
+                    )?;
+                    let v = BackendStat::new(meta.free);
+                    Ok((k.value(), v))
+                })
+            })
+            .collect::<Result<HashMap<BackendId, BackendStat>, redb::Error>>()?;
+        Ok(AppInitData { backends_stat })
     }
 
     /// Returns an iterator over children of an inode
@@ -285,6 +309,19 @@ impl Db {
         res
     }
 
+    pub fn get_backend(&self, id: &BackendId) -> Result<Option<BackendMeta>, redb::Error> {
+        let txn = self.redb.begin_read()?;
+        let table = txn.open_table(BACKENDS)?;
+        table.get(id).map_err(redb::Error::from).and_then(|o| {
+            o.map(|v| {
+                compactly::decode::<BackendMeta>(v.value()).ok_or(redb::Error::Corrupted(
+                    "Failed to read backend metadata".to_string(),
+                ))
+            })
+            .transpose()
+        })
+    }
+
     pub fn list_backends(
         &self,
     ) -> Result<
@@ -305,8 +342,36 @@ impl Db {
         });
         Ok(backends)
     }
+
+    pub fn reserve_chunk_ids(&self, count: u64) -> Result<RangeInclusive<ChunkId>, ReserveError> {
+        let txn = self.redb.begin_write()?;
+
+        let range = {
+            let mut table = txn.open_table(METADATA)?;
+            let mut next_id_guard = table
+                .get_mut(Metadata::NextChunk as u8)?
+                .ok_or(ReserveError::Corrupted)?;
+            let next_id = ChunkId::from_le_bytes(
+                *next_id_guard
+                    .value()
+                    .as_array()
+                    .ok_or(ReserveError::Corrupted)?,
+            );
+
+            let new_next_id = next_id.checked_add(count).ok_or(ReserveError::OutOfIds)?;
+            next_id_guard.insert(new_next_id.to_le_bytes().as_slice())?;
+            next_id..=new_next_id - 1
+        };
+
+        txn.commit()?;
+        debug_assert_eq!(range.clone().count() as u64, count);
+        Ok(range)
+    }
 }
 
+pub struct AppInitData {
+    pub backends_stat: HashMap<BackendId, BackendStat>,
+}
 macro_rules! impl_from_redb {
     ($typ:ty => $nam:ident, $($ty:ty),* $(,)?) => {
         $(
@@ -364,7 +429,7 @@ pub enum CreateInodeError {
     NameConflict,
     #[display("Parent is not a directory")]
     ParentNotDir,
-    #[display("Ran out if inode ids")]
+    #[display("Ran out of inode ids")]
     OutOfIds,
 }
 
@@ -409,10 +474,6 @@ impl From<LookupError> for CreateInodeError {
 #[display("Failed to add a backend to the db")]
 pub enum AddBackendError {
     Db(redb::Error),
-    #[display("Db is corrupted")]
-    Corrupted,
-    #[display("Ran out if inode ids")]
-    OutOfIds,
     #[display("Backend with this id already exists")]
     AlreadyPresent,
 }
@@ -435,6 +496,24 @@ pub enum ListBackendsError {
 
 impl_from_redb!(
     ListBackendsError => Db,
+    redb::StorageError,
+    redb::TableError,
+    redb::TransactionError,
+);
+
+#[derive(Debug, Display, Error, From)]
+#[display("Failed to iterate over backends")]
+pub enum ReserveError {
+    Db(redb::Error),
+    #[display("Failed to decode inode metadata. Db is most likely corrupted")]
+    Corrupted,
+    #[display("Ran out of chunk ids")]
+    OutOfIds,
+}
+
+impl_from_redb!(
+    ReserveError => Db,
+    redb::CommitError,
     redb::StorageError,
     redb::TableError,
     redb::TransactionError,

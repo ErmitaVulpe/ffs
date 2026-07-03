@@ -17,7 +17,10 @@ trait BackendMod {
     type BackendImpl: Backend;
     type InitCtx;
 
-    async fn init(id: BackendId, ctx: Self::InitCtx) -> Result<Arc<dyn Backend>, BackendError<InitError>>;
+    async fn init(
+        id: BackendId,
+        ctx: Self::InitCtx,
+    ) -> Result<Arc<dyn Backend>, BackendError<InitError>>;
     async fn generate() -> anyhow::Result<BackendKind>;
 }
 
@@ -80,12 +83,15 @@ pub async fn init(
     match backend_data {
         #[cfg(debug_assertions)]
         BackendKind::Dummy(path) => dummy::DummyImpl::init(id, path).await,
+        BackendKind::GoogleDrive => todo!(),
     }
 }
 
 /// This is used as an initial generator for init data of backends
 pub async fn generate_backend(kind: BackendKindSpecifier) -> anyhow::Result<BackendKind> {
     match kind {
+        #[cfg(debug_assertions)]
         BackendKindSpecifier::Dummy => dummy::DummyImpl::generate().await,
+        BackendKindSpecifier::GoogleDrive => todo!(),
     }
 }

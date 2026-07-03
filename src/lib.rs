@@ -1,28 +1,39 @@
-mod backend;
-mod db;
-mod splitter;
-
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
 pub use db::{BackendKindSpecifier, BackendParseError, InodeMeta, InodePath, InodePathParseError};
-use tokio::sync::RwLock;
+use derive_more::{Display, Error, From};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    backend::Backend,
-    db::{BackendId, BackendMeta, ListBackendsError, LookupError},
+    backend::{Backend, BackendError, InitError},
+    chunk_alloc::ChunkAlloc,
+    db::{BackendId, BackendMeta, ChunkData, ListBackendsError, LookupError},
+    splitter::Splitter,
 };
+
+mod backend;
+mod chunk_alloc;
+mod db;
+mod splitter;
 
 pub struct App {
     backends: RwLock<HashMap<BackendId, Arc<dyn Backend>>>,
+    chunk_alloc: Mutex<ChunkAlloc>,
     db: db::Db,
 }
 
 impl App {
     pub fn new(db_path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let db = db::Db::new(db_path)?;
+        let init_data = db.app_init_data()?;
+        let round_robin = Mutex::new(ChunkAlloc::new(init_data.backends_stat)?);
         let backends = RwLock::new(HashMap::new());
-        Ok(Self { backends, db })
+        Ok(Self {
+            backends,
+            chunk_alloc: round_robin,
+            db,
+        })
     }
 
     pub async fn add_backend(&self, kind: BackendKindSpecifier) -> anyhow::Result<()> {
@@ -55,6 +66,21 @@ impl App {
 
         self.db.add_backend(id, meta)?;
         Ok(())
+    }
+
+    async fn get_backend(&self, id: BackendId) -> Result<Arc<dyn Backend>, GetBackendError> {
+        if let Some(backend) = self.backends.read().await.get(&id) {
+            return Ok(backend.clone());
+        }
+
+        let meta = self
+            .db
+            .get_backend(&id)?
+            .ok_or(GetBackendError::NoSuchBackend)?;
+
+        let backend = backend::init(id, meta.kind).await?;
+        self.backends.write().await.insert(id, backend.clone());
+        Ok(backend)
     }
 
     pub fn compact_db(&mut self) -> Result<bool, redb::CompactionError> {
@@ -99,5 +125,39 @@ impl App {
         Ok(())
     }
 
-    pub async fn upload_file() {}
+    pub async fn upload_buf(&self, destination: InodePath, buf: &[u8]) -> anyhow::Result<()> {
+        let splitter = Splitter::new(buf.len() as u64);
+        let number_of_chunks = splitter.len();
+        let ids = self.db.reserve_chunk_ids(number_of_chunks as u64)?;
+        let mut alloc = self.chunk_alloc.lock().await;
+        let upload_plan = ids
+            .zip(splitter)
+            .scan(0, |offset, (id, len)| {
+                let Some(backend_id) = alloc.allocate(len) else {
+                    return Some(Err(anyhow::anyhow!("Out of space")));
+                };
+                let chunk_data = ChunkData {
+                    offset: *offset,
+                    length: len,
+                    backend_id,
+                    chunk_id: id,
+                };
+                *offset += len as u64;
+                Some(Ok(chunk_data))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        println!("{upload_plan:#?}");
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Display, Error, From)]
+pub enum GetBackendError {
+    Db(redb::Error),
+    #[display("Tried to get a non existing backend")]
+    NoSuchBackend,
+    #[display("Failed to init the backend")]
+    Backend(BackendError<InitError>),
 }

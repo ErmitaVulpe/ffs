@@ -1,7 +1,10 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ffs::{App, BackendKindSpecifier, InodePath};
 use indoc::indoc;
+use tokio::fs;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -55,7 +58,7 @@ impl Command {
                 app.compact_db().map_err(anyhow::Error::from)?;
                 Ok(())
             }
-            Command::Run { command } => command.run(app),
+            Command::Run { command } => command.run(app).await,
         }
     }
 }
@@ -90,10 +93,10 @@ impl BackendSubCommand {
         match self {
             BackendSubCommand::Add { kind } => app.add_backend(kind).await,
             BackendSubCommand::List => {
-                let mut table = tabled::builder::Builder::new();
+                let mut builder = tabled::builder::Builder::new();
                 for result in app.list_backends()? {
                     let (id, meta) = result?;
-                    table.push_record(
+                    builder.push_record(
                         [
                             id.to_string(),
                             meta.free.to_string(),
@@ -105,7 +108,8 @@ impl BackendSubCommand {
                     );
                 }
 
-                let table = table.build();
+                let mut table = builder.build();
+                table.get_config_mut().remove_borders();
                 println!("{table}");
                 Ok(())
             }
@@ -119,12 +123,23 @@ enum RunSubCommand {
     Ls { path: Option<InodePath> },
     #[command(about = "Create a new directory", short_flag = 'm')]
     Mkdir { path: InodePath },
+    #[command(about = "Pushes a new file into ffs", short_flag = 'u')]
+    Push {
+        #[arg(value_parser = |s: &str| {
+            let p: &Path = s.as_ref();
+            p.is_file()
+                .then(|| p.to_path_buf())
+                .ok_or("Specified src path doesn't contain a file")
+        })]
+        src: PathBuf,
+        target: InodePath,
+    },
     #[command(about = "Remove a file or directory", short_flag = 'r')]
     Rm { path: InodePath },
 }
 
 impl RunSubCommand {
-    fn run(self, app: App) -> anyhow::Result<()> {
+    async fn run(self, app: App) -> anyhow::Result<()> {
         match self {
             RunSubCommand::Ls { path } => {
                 let path = path.unwrap_or_default();
@@ -136,6 +151,10 @@ impl RunSubCommand {
                 Ok(())
             }
             RunSubCommand::Mkdir { path } => app.mkdir(path),
+            Self::Push { src, target } => {
+                let buf = fs::read(&src).await?;
+                app.upload_buf(target, &buf).await
+            }
             RunSubCommand::Rm { path } => app.rm(&path),
         }
     }

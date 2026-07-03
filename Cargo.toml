@@ -17,3 +17,4 @@ inquire = "0.9.4"
 redb = "4.1.0"
 tabled = "0.21.0"
 tokio = { version = "1.52.3", features = ["full"] }
+weighted-rs = "0.1.3"

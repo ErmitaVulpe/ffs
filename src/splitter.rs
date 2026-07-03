@@ -23,6 +23,10 @@ impl Splitter {
             goal_size,
         }
     }
+
+    pub fn size(&self) -> u64 {
+        self.bytes_left.div_ceil(self.goal_size as u64)
+    }
 }
 
 impl Iterator for Splitter {
@@ -42,8 +46,16 @@ impl Iterator for Splitter {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let num = self.bytes_left.div_ceil(self.goal_size as u64) as usize;
+        let num = self.size() as usize;
         (num, Some(num))
+    }
+}
+
+impl ExactSizeIterator for Splitter {
+    fn len(&self) -> usize {
+        let (lower, upper) = self.size_hint();
+        debug_assert_eq!(upper, Some(lower));
+        lower
     }
 }
 

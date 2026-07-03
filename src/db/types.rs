@@ -15,8 +15,12 @@ pub type ChunkId = u64;
 pub const BACKENDS: TableDefinition<BackendId, &[u8]> = TableDefinition::new("BACKENDS");
 /// Chunks making up the inodes
 pub const CHUNKS: TableDefinition<ChunkId, ChunkData> = TableDefinition::new("CHUNKS");
+/// Chunks marked to be dropped
 pub const CHUNKS_TO_DROP: MultimapTableDefinition<(), ChunkId> =
     MultimapTableDefinition::new("CHUNKS_TO_DROP");
+/// Chunks for pending uploads
+pub const TEMP_CHUNKS: MultimapTableDefinition<(), ChunkId> =
+    MultimapTableDefinition::new("TEMP_CHUNKS");
 /// Metadata of an inode. Contains encoded `InodeMeta`
 pub const INODES: TableDefinition<InodeId, &[u8]> = TableDefinition::new("INODES");
 pub const CHUNKS_OF_INODES: MultimapTableDefinition<InodeId, ChunkId> =
@@ -44,6 +48,8 @@ pub enum BackendKind {
     #[cfg(debug_assertions)]
     #[display("Dummy")]
     Dummy(String) = 0,
+    #[display("GoogleDrive")]
+    GoogleDrive = 1,
 }
 
 #[derive(Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,6 +59,8 @@ pub enum BackendKindSpecifier {
     #[cfg(debug_assertions)]
     #[display("Dummy")]
     Dummy = 0,
+    #[display("GoogleDrive")]
+    GoogleDrive = 1,
 }
 
 impl FromStr for BackendKindSpecifier {
@@ -61,7 +69,9 @@ impl FromStr for BackendKindSpecifier {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let a = s.to_lowercase();
         Ok(match a.as_str() {
+            #[cfg(debug_assertions)]
             "dummy" => Self::Dummy,
+            "google" | "googledrive" => Self::GoogleDrive,
             _ => return Err(BackendParseError),
         })
     }
