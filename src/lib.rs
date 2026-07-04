@@ -125,7 +125,11 @@ impl App {
         Ok(())
     }
 
-    pub async fn upload_buf(&self, destination: InodePath, buf: &[u8]) -> anyhow::Result<()> {
+    pub async fn upload_buf(
+        self: &Arc<Self>,
+        destination: InodePath,
+        buf: &[u8],
+    ) -> anyhow::Result<()> {
         let splitter = Splitter::new(buf.len() as u64);
         let number_of_chunks = splitter.len();
         let ids = self.db.reserve_chunk_ids(number_of_chunks as u64)?;
@@ -147,7 +151,16 @@ impl App {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        println!("{upload_plan:#?}");
+        self.db.add_temp_chunks(upload_plan.iter())?;
+
+        let mut handles = Vec::with_capacity(number_of_chunks);
+        for chunk in upload_plan {
+            let local_self = self.clone();
+            handles.push(tokio::spawn(async move {
+                local_self.get_backend(chunk.backend_id).await?;
+                anyhow::Ok(())
+            }));
+        }
 
         Ok(())
     }

@@ -6,8 +6,8 @@ use redb::{ReadableDatabase, ReadableMultimapTable, ReadableTable};
 use crate::{
     chunk_alloc::BackendStat,
     db::types::{
-        BACKENDS, CHUNKS_OF_INODES, CHUNKS_TO_DROP, INODE_RELATION_CHILDREN, INODE_RELATION_PARENT,
-        INODES, InodeFlags, InodeId, METADATA, Metadata,
+        BACKENDS, CHUNKS, CHUNKS_OF_INODES, CHUNKS_TO_DROP, INODE_RELATION_CHILDREN,
+        INODE_RELATION_PARENT, INODES, InodeFlags, InodeId, METADATA, Metadata, TEMP_CHUNKS,
     },
 };
 
@@ -366,6 +366,25 @@ impl Db {
         txn.commit()?;
         debug_assert_eq!(range.clone().count() as u64, count);
         Ok(range)
+    }
+
+    pub fn add_temp_chunks<'a>(
+        &self,
+        temp_chunks: impl Iterator<Item = &'a ChunkData>,
+    ) -> Result<(), redb::Error> {
+        let txn = self.redb.begin_write()?;
+
+        {
+            let mut chunks_table = txn.open_table(CHUNKS)?;
+            let mut temp_chunks_table = txn.open_multimap_table(TEMP_CHUNKS)?;
+            for chunk in temp_chunks {
+                chunks_table.insert(chunk.chunk_id, chunk)?;
+                temp_chunks_table.insert((), chunk.chunk_id)?;
+            }
+        }
+
+        txn.commit()?;
+        Ok(())
     }
 }
 

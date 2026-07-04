@@ -25,7 +25,7 @@ trait BackendMod {
 }
 
 #[async_trait]
-pub trait Backend {
+pub trait Backend: Send + Sync {
     /// Returns the tuple of used bytes and total storable bytes
     async fn stat(&self) -> Result<BackendStat, BackendError<StatError>>;
 
