@@ -1,6 +1,5 @@
-use std::str::FromStr;
+use std::{ops::Range, str::FromStr};
 
-use bytemuck::{Pod, Zeroable, bytes_of, from_bytes};
 use compactly::Encode;
 use derive_more::{Display, Error};
 use redb::{MultimapTableDefinition, TableDefinition, TypeName, Value};
@@ -16,11 +15,9 @@ pub const BACKENDS: TableDefinition<BackendId, &[u8]> = TableDefinition::new("BA
 /// Chunks making up the inodes
 pub const CHUNKS: TableDefinition<ChunkId, ChunkData> = TableDefinition::new("CHUNKS");
 /// Chunks marked to be dropped
-pub const CHUNKS_TO_DROP: MultimapTableDefinition<(), ChunkId> =
-    MultimapTableDefinition::new("CHUNKS_TO_DROP");
+pub const CHUNKS_TO_DROP: TableDefinition<ChunkId, ()> = TableDefinition::new("CHUNKS_TO_DROP");
 /// Chunks for pending uploads
-pub const TEMP_CHUNKS: MultimapTableDefinition<(), ChunkId> =
-    MultimapTableDefinition::new("TEMP_CHUNKS");
+pub const TEMP_CHUNKS: TableDefinition<ChunkId, ()> = TableDefinition::new("TEMP_CHUNKS");
 /// Metadata of an inode. Contains encoded `InodeMeta`
 pub const INODES: TableDefinition<InodeId, &[u8]> = TableDefinition::new("INODES");
 pub const CHUNKS_OF_INODES: MultimapTableDefinition<InodeId, ChunkId> =
@@ -82,12 +79,57 @@ impl FromStr for BackendKindSpecifier {
 pub struct BackendParseError;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Zeroable, Pod)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ChunkData {
+    pub inode_id: InodeId,
     pub offset: u64,
     pub length: u32,
     pub backend_id: BackendId,
-    pub chunk_id: ChunkId,
+}
+
+impl ChunkData {
+    pub fn as_range(&self) -> Range<usize> {
+        let offset = self.offset as usize;
+        offset..offset + self.length as usize
+    }
+}
+
+impl Value for ChunkData {
+    type SelfType<'a> = Self;
+    type AsBytes<'a> = [u8; size_of::<Self>()];
+
+    fn fixed_width() -> Option<usize> {
+        Some(size_of::<Self>())
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        debug_assert_eq!(data.len(), size_of::<Self>());
+        Self {
+            inode_id: InodeId::from_le_bytes(data[0..8].try_into().unwrap()),
+            offset: u64::from_le_bytes(data[8..16].try_into().unwrap()),
+            length: u32::from_le_bytes(data[16..20].try_into().unwrap()),
+            backend_id: BackendId::from_le_bytes(data[20..24].try_into().unwrap()),
+        }
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        let mut bytes = [0u8; 24];
+        bytes[0..8].copy_from_slice(&value.inode_id.to_le_bytes());
+        bytes[8..16].copy_from_slice(&value.offset.to_le_bytes());
+        bytes[16..20].copy_from_slice(&value.length.to_le_bytes());
+        bytes[20..24].copy_from_slice(&value.backend_id.to_le_bytes());
+        bytes
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::new("ffs::ChunkData")
+    }
 }
 
 #[repr(transparent)]
@@ -99,8 +141,6 @@ bitflags::bitflags! {
         const IS_FILE = 1; // 0 for a directory, 1 for a file
     }
 }
-unsafe impl Zeroable for InodeFlags {}
-unsafe impl Pod for InodeFlags {}
 
 #[repr(C)]
 #[derive(Clone, Debug, Encode)]
@@ -136,43 +176,10 @@ impl InodeMeta {
     }
 }
 
-macro_rules! impl_redb_value {
-    ($t:ty) => {
-        impl Value for $t {
-            type SelfType<'a> = Self;
-            type AsBytes<'a> = &'a [u8];
-
-            fn fixed_width() -> Option<usize> {
-                Some(size_of::<Self>())
-            }
-
-            fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-            where
-                Self: 'a,
-            {
-                *from_bytes(data)
-            }
-
-            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-            where
-                Self: 'b,
-            {
-                bytes_of(value)
-            }
-
-            fn type_name() -> TypeName {
-                TypeName::new(stringify!($t))
-            }
-        }
-    };
-}
-
-impl_redb_value!(ChunkData);
-
 /// Keys for the metadata table
 #[allow(clippy::enum_variant_names)]
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Metadata {
     /// Stored as `BackendId`
     NextBackend = 0,

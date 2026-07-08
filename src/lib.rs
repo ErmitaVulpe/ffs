@@ -3,12 +3,15 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::Context;
 pub use db::{BackendKindSpecifier, BackendParseError, InodeMeta, InodePath, InodePathParseError};
 use derive_more::{Display, Error, From};
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinSet,
+};
 
 use crate::{
     backend::{Backend, BackendError, InitError},
     chunk_alloc::ChunkAlloc,
-    db::{BackendId, BackendMeta, ChunkData, ListBackendsError, LookupError},
+    db::{BackendId, BackendMeta, ChunkData, DbError, InodeFlags},
     splitter::Splitter,
 };
 
@@ -24,16 +27,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(db_path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+    pub fn new(db_path: impl AsRef<std::path::Path>) -> anyhow::Result<Arc<Self>> {
         let db = db::Db::new(db_path)?;
         let init_data = db.app_init_data()?;
         let round_robin = Mutex::new(ChunkAlloc::new(init_data.backends_stat)?);
         let backends = RwLock::new(HashMap::new());
-        Ok(Self {
+        Ok(Arc::new(Self {
             backends,
             chunk_alloc: round_robin,
             db,
-        })
+        }))
     }
 
     pub async fn add_backend(&self, kind: BackendKindSpecifier) -> anyhow::Result<()> {
@@ -83,23 +86,20 @@ impl App {
         Ok(backend)
     }
 
-    pub fn compact_db(&mut self) -> Result<bool, redb::CompactionError> {
+    pub fn compact_db(&self) -> Result<bool, DbError> {
         self.db.compact()
     }
 
     pub fn list_backends(
         &self,
-    ) -> Result<
-        impl Iterator<Item = Result<(BackendId, BackendMeta), ListBackendsError>>,
-        ListBackendsError,
-    > {
+    ) -> db::Result<impl Iterator<Item = db::Result<(BackendId, BackendMeta)>>> {
         self.db.list_backends()
     }
 
     pub fn read_dir(
         &self,
         path: &InodePath,
-    ) -> anyhow::Result<impl Iterator<Item = Result<(u64, InodeMeta), LookupError>>> {
+    ) -> anyhow::Result<impl Iterator<Item = db::Result<(u64, InodeMeta)>>> {
         let inode = self.db.inode_lookup(path)?.context("Directory not found")?;
         let res = self.db.iter_children(inode)?;
         Ok(res)
@@ -107,12 +107,13 @@ impl App {
 
     pub fn mkdir(&self, mut path: InodePath) -> anyhow::Result<()> {
         let name = path.pop().context("No directory name specified")?;
-        let inode = InodeMeta::new_directory(name);
+        let meta = InodeMeta::new_directory(name);
         let parent_inode = self
             .db
             .inode_lookup(&path)?
             .context("Parent directory doesnt exist")?;
-        self.db.create_inode(parent_inode, inode)?;
+        let inode = self.db.reserve_inode_id()?;
+        self.db.create_inode(parent_inode, inode, meta)?;
         Ok(())
     }
 
@@ -127,40 +128,93 @@ impl App {
 
     pub async fn upload_buf(
         self: &Arc<Self>,
-        destination: InodePath,
-        buf: &[u8],
+        mut destination: InodePath,
+        buf: Arc<Vec<u8>>,
     ) -> anyhow::Result<()> {
+        // Check if destination path is valid
+        let filename = destination
+            .pop()
+            .context("Destination path needs to include a filename")?;
+        let parent_inode = self
+            .db
+            .inode_lookup(&destination)?
+            .context("Parent dir does not exist")?;
+        let parent_meta = self
+            .db
+            .inode_meta(parent_inode)?
+            .ok_or_else(|| redb::Error::Corrupted("Dangling inode id".to_string()))?;
+
+        if !parent_meta.is_dir() {
+            return Err(anyhow::anyhow!("Specified parent is not a directory"));
+        }
+
+        let inode_id = self.db.reserve_inode_id()?;
+
+        // Prepare for upload
         let splitter = Splitter::new(buf.len() as u64);
         let number_of_chunks = splitter.len();
         let ids = self.db.reserve_chunk_ids(number_of_chunks as u64)?;
         let mut alloc = self.chunk_alloc.lock().await;
         let upload_plan = ids
+            .clone()
             .zip(splitter)
             .scan(0, |offset, (id, len)| {
                 let Some(backend_id) = alloc.allocate(len) else {
                     return Some(Err(anyhow::anyhow!("Out of space")));
                 };
                 let chunk_data = ChunkData {
+                    inode_id,
                     offset: *offset,
                     length: len,
                     backend_id,
-                    chunk_id: id,
                 };
                 *offset += len as u64;
-                Some(Ok(chunk_data))
+                Some(Ok((id, chunk_data)))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        drop(alloc);
 
         self.db.add_temp_chunks(upload_plan.iter())?;
 
-        let mut handles = Vec::with_capacity(number_of_chunks);
-        for chunk in upload_plan {
+        // Start uploading chunks
+        let mut handles = JoinSet::new();
+        for (id, chunk) in upload_plan {
             let local_self = self.clone();
-            handles.push(tokio::spawn(async move {
-                local_self.get_backend(chunk.backend_id).await?;
+            let buf = buf.clone();
+            handles.spawn(async move {
+                local_self
+                    .get_backend(chunk.backend_id)
+                    .await?
+                    .upload(id, &buf[chunk.as_range()])
+                    .await?;
                 anyhow::Ok(())
-            }));
+            });
         }
+
+        // Wait for uploading to finish and handle errors
+        loop {
+            match handles.join_next().await {
+                None => break Ok(()),
+                Some(res) => {
+                    let res = res.map_err(anyhow::Error::from).flatten();
+                    if let Err(err) = res {
+                        handles.abort_all();
+                        self.db.cancel_temp_chunks(ids.clone())?;
+                        break Err(err);
+                    }
+                }
+            }
+        }?;
+
+        // Finish up the upload
+        let meta = InodeMeta {
+            name: filename,
+            inode_flags: InodeFlags::IS_FILE,
+            size: buf.len() as u64,
+        };
+
+        self.db.commit_temp_chunks(ids)?;
+        self.db.create_inode(parent_inode, inode_id, meta)?;
 
         Ok(())
     }
@@ -168,7 +222,7 @@ impl App {
 
 #[derive(Debug, Display, Error, From)]
 pub enum GetBackendError {
-    Db(redb::Error),
+    Db(DbError),
     #[display("Tried to get a non existing backend")]
     NoSuchBackend,
     #[display("Failed to init the backend")]

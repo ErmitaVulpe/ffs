@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -51,7 +54,7 @@ enum Command {
 }
 
 impl Command {
-    async fn run(self, mut app: App) -> anyhow::Result<()> {
+    async fn run(self, app: Arc<App>) -> anyhow::Result<()> {
         match self {
             Command::Backend { command } => command.run(app).await,
             Command::Compact => {
@@ -89,7 +92,7 @@ fn backend_kind_parser(s: &str) -> anyhow::Result<BackendKindSpecifier> {
 }
 
 impl BackendSubCommand {
-    async fn run(self, app: App) -> anyhow::Result<()> {
+    async fn run(self, app: Arc<App>) -> anyhow::Result<()> {
         match self {
             BackendSubCommand::Add { kind } => app.add_backend(kind).await,
             BackendSubCommand::List => {
@@ -123,8 +126,8 @@ enum RunSubCommand {
     Ls { path: Option<InodePath> },
     #[command(about = "Create a new directory", short_flag = 'm')]
     Mkdir { path: InodePath },
-    #[command(about = "Pushes a new file into ffs", short_flag = 'u')]
-    Push {
+    #[command(about = "Uploads a new file into ffs", short_flag = 'u')]
+    Upload {
         #[arg(value_parser = |s: &str| {
             let p: &Path = s.as_ref();
             p.is_file()
@@ -139,7 +142,7 @@ enum RunSubCommand {
 }
 
 impl RunSubCommand {
-    async fn run(self, app: App) -> anyhow::Result<()> {
+    async fn run(self, app: Arc<App>) -> anyhow::Result<()> {
         match self {
             RunSubCommand::Ls { path } => {
                 let path = path.unwrap_or_default();
@@ -151,9 +154,9 @@ impl RunSubCommand {
                 Ok(())
             }
             RunSubCommand::Mkdir { path } => app.mkdir(path),
-            Self::Push { src, target } => {
+            Self::Upload { src, target } => {
                 let buf = fs::read(&src).await?;
-                app.upload_buf(target, &buf).await
+                app.upload_buf(target, Arc::new(buf)).await
             }
             RunSubCommand::Rm { path } => app.rm(&path),
         }
