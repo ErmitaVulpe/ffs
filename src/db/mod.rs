@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, btree_map::Entry},
+    collections::{BTreeMap, HashMap},
     ops::{RangeBounds, RangeInclusive},
     path::Path,
     str::FromStr,
@@ -50,10 +50,7 @@ impl Db {
 
                 let mut inodes = txn.open_table(types::INODES)?;
                 // init root inode
-                inodes.insert(
-                    0,
-                    &InodeMeta::new_directory(String::new()).encode().as_slice(),
-                )?;
+                inodes.insert(0, &InodeMeta::new_directory(String::new()))?;
 
                 txn.open_multimap_table(types::CHUNKS_OF_INODES)?;
                 txn.open_multimap_table(types::INODE_RELATION_CHILDREN)?;
@@ -98,8 +95,7 @@ impl Db {
             .iter()?
             .map(|r| {
                 r.map_err(DbError::from).and_then(|(k, v)| {
-                    let meta = compactly::decode::<BackendMeta>(v.value())
-                        .ok_or(DbError::Corrupted("Failed to read backend metadata"))?;
+                    let meta = v.value();
                     let v = BackendStat::new(meta.free);
                     Ok((k.value(), v))
                 })
@@ -127,11 +123,9 @@ impl Db {
                         .get(id)
                         .map_err(DbError::from)
                         .and_then(|o| match o {
-                            Some(v) => Ok(compactly::decode::<InodeMeta>(v.value())
-                                .ok_or(DbError::CorruptedData)),
+                            Some(v) => Ok(v.value()),
                             None => Err(DbError::CorruptedStructure),
                         })
-                        .flatten()
                         .map(|v| (id, v))
                 })
             }))
@@ -167,7 +161,7 @@ impl Db {
             .open_table(INODES)?
             .get(&inode)
             .map_err(DbError::from)
-            .map(|o| o.and_then(|a| compactly::decode::<InodeMeta>(a.value())))
+            .map(|o| o.map(|a| a.value()))
     }
 
     pub fn create_inode(&self, parent: InodeId, id: InodeId, meta: InodeMeta) -> Result<()> {
@@ -184,7 +178,7 @@ impl Db {
             let mut inodes = txn.open_table(INODES)?;
 
             let parent_meta = if let Some(meta) = inodes.get(parent)? {
-                compactly::decode::<InodeMeta>(meta.value()).ok_or(DbError::CorruptedData)?
+                meta.value()
             } else {
                 return Err(DbError::AttemptedOrphan);
             };
@@ -193,7 +187,7 @@ impl Db {
                 return Err(DbError::ParentNotDir);
             }
 
-            let res = inodes.insert(&id, meta.encode().as_slice())?;
+            let res = inodes.insert(&id, meta)?;
             debug_assert!(res.is_none());
 
             let mut children_rel = txn.open_multimap_table(INODE_RELATION_CHILDREN)?;
@@ -213,13 +207,10 @@ impl Db {
 
         {
             let mut inodes = txn.open_table(INODES)?;
-            let meta = compactly::decode::<InodeMeta>(
-                inodes
-                    .get(inode)?
-                    .ok_or(DbError::NotFound(OutOfIdsKind::Inode))?
-                    .value(),
-            )
-            .ok_or(DbError::NotFound(OutOfIdsKind::Inode))?;
+            let meta = inodes
+                .get(inode)?
+                .ok_or(DbError::NotFound(OutOfIdsKind::Inode))?
+                .value();
 
             match meta.inode_flags.contains(InodeFlags::IS_FILE) {
                 true => {
@@ -302,7 +293,7 @@ impl Db {
 
         let res = {
             let mut backends_table = txn.open_table(BACKENDS)?;
-            let res = backends_table.insert(id, compactly::encode(&meta).as_slice())?;
+            let res = backends_table.insert(id, &meta)?;
             if res.is_some() {
                 Err(DbError::DuplicateId(OutOfIdsKind::Backend))
             } else {
@@ -321,10 +312,10 @@ impl Db {
     pub fn get_backend(&self, id: &BackendId) -> Result<Option<BackendMeta>> {
         let txn = self.get_redb().begin_read()?;
         let table = txn.open_table(BACKENDS)?;
-        table.get(id).map_err(DbError::from).and_then(|o| {
-            o.map(|v| compactly::decode::<BackendMeta>(v.value()).ok_or(DbError::CorruptedData))
-                .transpose()
-        })
+        table
+            .get(id)
+            .map_err(DbError::from)
+            .map(|o| o.map(|v| v.value()))
     }
 
     pub fn list_backends(&self) -> Result<impl Iterator<Item = Result<(BackendId, BackendMeta)>>> {
@@ -335,8 +326,7 @@ impl Db {
         let backends = table.range(0..=u32::MAX)?.map(|e| {
             e.map_err(DbError::from).and_then(|pair| {
                 let k = pair.0.value();
-                let v = compactly::decode::<BackendMeta>(pair.1.value())
-                    .ok_or(DbError::CorruptedData)?;
+                let v = pair.1.value();
                 Ok((k, v))
             })
         });
@@ -458,13 +448,12 @@ impl Db {
 
             for (id, ammount) in space_to_sub {
                 let mut guard = backends.get_mut(&id)?.ok_or(DbError::CorruptedStructure)?;
-                let mut meta = compactly::decode::<BackendMeta>(guard.value())
-                    .ok_or(DbError::CorruptedData)?;
+                let mut meta = guard.value();
                 meta.free = meta
                     .free
                     .checked_sub(ammount)
                     .ok_or(DbError::CorruptedStructure)?;
-                guard.insert(compactly::encode(&meta).as_slice())?;
+                guard.insert(&meta)?;
             }
         }
 

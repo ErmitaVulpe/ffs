@@ -10,16 +10,16 @@ pub type InodeId = u64;
 /// Id of a data chunk
 pub type ChunkId = u64;
 
-/// Metadata of a specific backend. Contains encoded `BackendMeta`
-pub const BACKENDS: TableDefinition<BackendId, &[u8]> = TableDefinition::new("BACKENDS");
+/// Metadata of a specific backend
+pub const BACKENDS: TableDefinition<BackendId, BackendMeta> = TableDefinition::new("BACKENDS");
 /// Chunks making up the inodes
 pub const CHUNKS: TableDefinition<ChunkId, ChunkData> = TableDefinition::new("CHUNKS");
 /// Chunks marked to be dropped
 pub const CHUNKS_TO_DROP: TableDefinition<ChunkId, ()> = TableDefinition::new("CHUNKS_TO_DROP");
 /// Chunks for pending uploads
 pub const TEMP_CHUNKS: TableDefinition<ChunkId, ()> = TableDefinition::new("TEMP_CHUNKS");
-/// Metadata of an inode. Contains encoded `InodeMeta`
-pub const INODES: TableDefinition<InodeId, &[u8]> = TableDefinition::new("INODES");
+/// Metadata of an inode
+pub const INODES: TableDefinition<InodeId, InodeMeta> = TableDefinition::new("INODES");
 pub const CHUNKS_OF_INODES: MultimapTableDefinition<InodeId, ChunkId> =
     MultimapTableDefinition::new("CHUNKS_OF_INODES");
 
@@ -30,6 +30,37 @@ pub const INODE_RELATION_PARENT: TableDefinition<InodeId, InodeId> =
 
 pub const METADATA: TableDefinition<u8, &[u8]> = TableDefinition::new("METADATA");
 
+macro_rules! impl_redb_flex_value {
+    ($t:ty) => {
+        impl Value for $t {
+            type SelfType<'a> = Self;
+            type AsBytes<'a> = Vec<u8>;
+
+            fn fixed_width() -> Option<usize> {
+                None
+            }
+
+            fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+            where
+                Self: 'a,
+            {
+                compactly::decode(data).unwrap()
+            }
+
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+            where
+                Self: 'b,
+            {
+                compactly::encode(value)
+            }
+
+            fn type_name() -> TypeName {
+                TypeName::new(stringify!($t))
+            }
+        }
+    };
+}
+
 #[derive(Clone, Debug, Encode, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BackendMeta {
     pub free: u64,
@@ -37,6 +68,8 @@ pub struct BackendMeta {
     pub chunks_contained: u32,
     pub kind: BackendKind,
 }
+
+impl_redb_flex_value!(BackendMeta);
 
 #[derive(Clone, Debug, Display, Encode, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -142,12 +175,11 @@ bitflags::bitflags! {
     }
 }
 
-#[repr(C)]
 #[derive(Clone, Debug, Encode)]
 pub struct InodeMeta {
     pub name: String,
-    pub inode_flags: InodeFlags,
     pub size: u64,
+    pub inode_flags: InodeFlags,
 }
 
 impl InodeMeta {
@@ -167,14 +199,12 @@ impl InodeMeta {
         }
     }
 
-    pub fn encode(&self) -> Vec<u8> {
-        compactly::encode(self)
-    }
-
     pub fn is_dir(&self) -> bool {
         !self.inode_flags.contains(InodeFlags::IS_FILE)
     }
 }
+
+impl_redb_flex_value!(InodeMeta);
 
 /// Keys for the metadata table
 #[allow(clippy::enum_variant_names)]

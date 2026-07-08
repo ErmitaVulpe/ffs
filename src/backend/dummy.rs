@@ -103,6 +103,14 @@ impl Backend for DummyBackend {
     }
 
     async fn upload(&self, id: ChunkId, data: &[u8]) -> Result<(), BackendError<UploadError>> {
+        let stat = self
+            .stat()
+            .await
+            .map_err(|e| BackendError::new(self.id, UploadError::Other(e.into())))?;
+        if stat.used + data.len() as u64 > stat.total {
+            return Err(BackendError::new(self.id, UploadError::OutOfSpace));
+        }
+
         let path = self.path_for(id);
         if fs::metadata(&path).await.is_ok() {
             return Err(BackendError::new(self.id, UploadError::ChunkDuplicate));
@@ -112,16 +120,9 @@ impl Backend for DummyBackend {
             .context("Failed to create a new chunk file")
             .map_err(|e| BackendError::new(self.id, UploadError::Other(e)))?;
 
-        match file.write(data).await {
-            Ok(n) => {
-                if n == data.len() {
-                    Ok(())
-                } else {
-                    Err(BackendError::new(self.id, UploadError::OutOfSpace))
-                }
-            }
-            Err(e) => Err(BackendError::new(self.id, UploadError::Other(e.into()))),
-        }
+        file.write_all(data)
+            .await
+            .map_err(|e| BackendError::new(self.id, UploadError::Other(e.into())))
     }
 
     async fn get(&self, id: ChunkId) -> Result<Vec<u8>, BackendError<GetError>> {
