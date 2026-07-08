@@ -94,10 +94,10 @@ impl Db {
             .open_table(BACKENDS)?
             .iter()?
             .map(|r| {
-                r.map_err(DbError::from).and_then(|(k, v)| {
+                r.map_err(DbError::from).map(|(k, v)| {
                     let meta = v.value();
                     let v = BackendStat::new(meta.free);
-                    Ok((k.value(), v))
+                    (k.value(), v)
                 })
             })
             .collect::<Result<HashMap<BackendId, BackendStat>>>()?;
@@ -324,11 +324,8 @@ impl Db {
         // .range has to be used here because it returns `Range<'static, K, V>`, and .iter returns
         // `Range<'_, K, V>`
         let backends = table.range(0..=u32::MAX)?.map(|e| {
-            e.map_err(DbError::from).and_then(|pair| {
-                let k = pair.0.value();
-                let v = pair.1.value();
-                Ok((k, v))
-            })
+            e.map_err(DbError::from)
+                .map(|pair| (pair.0.value(), pair.1.value()))
         });
         Ok(backends)
     }
