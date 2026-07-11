@@ -463,21 +463,10 @@ pub struct AppInitData {
     pub backends_stat: HashMap<BackendId, BackendStat>,
 }
 
-macro_rules! impl_from_redb {
-    ($typ:ty => $nam:ident, $($ty:ty),* $(,)?) => {
-        $(
-            impl From<$ty> for $typ {
-                fn from(value: $ty) -> Self {
-                    Self::$nam(value.into())
-                }
-            }
-        )*
-    };
-}
-
 #[derive(Debug, Display, Error, From)]
 #[display("Operation on the database failed")]
 pub enum DbError {
+    #[from(ignore)]
     Internal(redb::Error),
     #[display("Db is corrupted: {_0}")]
     #[from(ignore)]
@@ -505,15 +494,14 @@ pub enum DbError {
     HasChildren,
 }
 
-impl_from_redb!(
-    DbError => Internal,
-    redb::CommitError,
-    redb::CompactionError,
-    redb::DatabaseError,
-    redb::StorageError,
-    redb::TableError,
-    redb::TransactionError,
-);
+impl<T> From<T> for DbError
+where
+    T: Into<redb::Error>,
+{
+    fn from(value: T) -> Self {
+        DbError::Internal(value.into())
+    }
+}
 
 #[derive(Debug, Display)]
 pub enum OutOfIdsKind {
