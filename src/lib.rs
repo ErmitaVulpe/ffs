@@ -29,7 +29,8 @@ pub struct App {
 impl App {
     pub fn new(db_path: impl AsRef<std::path::Path>) -> anyhow::Result<Arc<Self>> {
         let db = db::Db::new(db_path)?;
-        let init_data = db.app_init_data()?;
+        let read_tx = db.read()?;
+        let init_data = read_tx.app_init_data()?;
         let round_robin = Mutex::new(ChunkAlloc::new(init_data.backends_stat)?);
         let backends = RwLock::new(HashMap::new());
         Ok(Arc::new(Self {
@@ -44,7 +45,9 @@ impl App {
             .await
             .context("Failed to generate new backend data")?;
 
-        let id = self.db.new_backend_id()?;
+        let txn = self.db.write()?;
+        let id = txn.new_backend_id()?;
+        txn.commit()?;
         let instance = backend::init(id, init_data.clone()).await?;
         let stat = instance
             .stat()
@@ -67,7 +70,9 @@ impl App {
             chunks_contained: 0,
         };
 
-        self.db.add_backend(id, meta)?;
+        let txn = self.db.write()?;
+        txn.add_backend(id, meta)?;
+        txn.commit()?;
         Ok(())
     }
 
@@ -76,8 +81,8 @@ impl App {
             return Ok(backend.clone());
         }
 
-        let meta = self
-            .db
+        let txn = self.db.read()?;
+        let meta = txn
             .get_backend(&id)?
             .ok_or(GetBackendError::NoSuchBackend)?;
 
@@ -90,39 +95,43 @@ impl App {
         self.db.compact()
     }
 
-    pub fn list_backends(
-        &self,
-    ) -> db::Result<impl Iterator<Item = db::Result<(BackendId, BackendMeta)>>> {
-        self.db.list_backends()
+    pub fn list_backends(&self) -> db::Result<Vec<(BackendId, BackendMeta)>> {
+        let txn = self.db.read()?;
+        txn.list_backends()?
+            .collect::<db::Result<Vec<(BackendId, BackendMeta)>>>()
     }
 
-    pub fn read_dir(
-        &self,
-        path: &InodePath,
-    ) -> anyhow::Result<impl Iterator<Item = db::Result<(u64, InodeMeta)>>> {
-        let inode = self.db.inode_lookup(path)?.context("Directory not found")?;
-        let res = self.db.iter_children(inode)?;
+    pub fn read_dir(&self, path: &InodePath) -> anyhow::Result<Vec<(u64, InodeMeta)>> {
+        let txn = self.db.read()?;
+        let inode = txn.inode_lookup(path)?.context("Directory not found")?;
+        let res = txn
+            .iter_children(inode)?
+            .map(|r| r.map_err(anyhow::Error::from))
+            .collect::<anyhow::Result<Vec<(u64, InodeMeta)>>>()?;
         Ok(res)
     }
 
     pub fn mkdir(&self, mut path: InodePath) -> anyhow::Result<()> {
         let name = path.pop().context("No directory name specified")?;
         let meta = InodeMeta::new_directory(name);
-        let parent_inode = self
-            .db
+
+        let txn = self.db.write()?;
+        let parent_inode = txn
             .inode_lookup(&path)?
             .context("Parent directory doesnt exist")?;
-        let inode = self.db.reserve_inode_id()?;
-        self.db.create_inode(parent_inode, inode, meta)?;
+        let inode = txn.reserve_inode_id()?;
+        txn.create_inode(parent_inode, inode, meta)?;
+        txn.commit()?;
         Ok(())
     }
 
     pub fn rm(&self, path: &InodePath) -> anyhow::Result<()> {
-        let inode = self
-            .db
+        let txn = self.db.write()?;
+        let inode = txn
             .inode_lookup(path)?
             .context("File or directory not found")?;
-        self.db.remove_inode(inode)?;
+        txn.remove_inode(inode)?;
+        txn.commit()?;
         Ok(())
     }
 
@@ -135,12 +144,11 @@ impl App {
         let filename = destination
             .pop()
             .context("Destination path needs to include a filename")?;
-        let parent_inode = self
-            .db
+        let txn = self.db.write()?;
+        let parent_inode = txn
             .inode_lookup(&destination)?
             .context("Parent dir does not exist")?;
-        let parent_meta = self
-            .db
+        let parent_meta = txn
             .inode_meta(parent_inode)?
             .ok_or_else(|| redb::Error::Corrupted("Dangling inode id".to_string()))?;
 
@@ -148,12 +156,13 @@ impl App {
             return Err(anyhow::anyhow!("Specified parent is not a directory"));
         }
 
-        let inode_id = self.db.reserve_inode_id()?;
+        let inode_id = txn.reserve_inode_id()?;
 
         // Prepare for upload
         let splitter = Splitter::new(buf.len() as u64);
         let number_of_chunks = splitter.len();
-        let ids = self.db.reserve_chunk_ids(number_of_chunks as u64)?;
+        let ids = txn.reserve_chunk_ids(number_of_chunks as u64)?;
+        txn.commit()?;
         let mut alloc = self.chunk_alloc.lock().await;
         let upload_plan = ids
             .clone()
@@ -174,7 +183,9 @@ impl App {
             .collect::<Result<Vec<_>, _>>()?;
         drop(alloc);
 
-        self.db.add_temp_chunks(upload_plan.iter())?;
+        let txn = self.db.write()?;
+        txn.add_temp_chunks(upload_plan.iter())?;
+        txn.commit()?;
 
         // Start uploading chunks
         let mut handles = JoinSet::new();
@@ -199,7 +210,9 @@ impl App {
                     let res = res.map_err(anyhow::Error::from).flatten();
                     if let Err(err) = res {
                         handles.abort_all();
-                        self.db.cancel_temp_chunks(ids.clone())?;
+                        let txn = self.db.write()?;
+                        txn.cancel_temp_chunks(ids.clone())?;
+                        txn.commit()?;
                         break Err(err);
                     }
                 }
@@ -213,9 +226,10 @@ impl App {
             size: buf.len() as u64,
         };
 
-        self.db.commit_temp_chunks(ids)?;
-        self.db.create_inode(parent_inode, inode_id, meta)?;
-
+        let txn = self.db.write()?;
+        txn.commit_temp_chunks(ids)?;
+        txn.create_inode(parent_inode, inode_id, meta)?;
+        txn.commit()?;
         Ok(())
     }
 }

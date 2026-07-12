@@ -97,8 +97,7 @@ impl BackendSubCommand {
             BackendSubCommand::Add { kind } => app.add_backend(kind).await,
             BackendSubCommand::List => {
                 let mut builder = tabled::builder::Builder::new();
-                for result in app.list_backends()? {
-                    let (id, meta) = result?;
+                for (id, meta) in app.list_backends()? {
                     builder.push_record(
                         [
                             id.to_string(),
@@ -146,8 +145,10 @@ impl RunSubCommand {
         match self {
             RunSubCommand::Ls { path } => {
                 let path = path.unwrap_or_default();
-                for child in app.read_dir(&path)? {
-                    let (_, meta) = child?;
+                for (_, mut meta) in app.read_dir(&path)? {
+                    if meta.is_dir() {
+                        meta.name.push('/');
+                    }
                     println!("{}", meta.name);
                 }
 
