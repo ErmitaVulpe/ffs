@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use anyhow::Context;
-use tokio::{fs, io::AsyncWriteExt, spawn, sync::RwLock, task::JoinSet};
+use tempfile::TempDir;
+use tokio::{fs, io::AsyncWriteExt, sync::RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -37,10 +38,13 @@ impl App {
 struct AppInner {
     bootstrap: Arc<dyn Backend>,
     state: RwLock<AppState>,
+    tempdir: TempDir,
 }
 
 impl AppInner {
     async fn new(bootstrap_path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let tempdir = TempDir::new()?;
+
         let base58 = fs::read_to_string(bootstrap_path)
             .await
             .context("Failed to read botstrap data")?;
@@ -59,6 +63,7 @@ impl AppInner {
         Ok(AppInner {
             bootstrap,
             state: RwLock::new(AppState::new(confirmed_state)),
+            tempdir,
         })
     }
 
@@ -93,6 +98,7 @@ impl AppInner {
         Ok(AppInner {
             bootstrap,
             state: RwLock::new(AppState::new(initial_state)),
+            tempdir: TempDir::new()?,
         })
     }
 

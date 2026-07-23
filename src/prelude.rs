@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use derive_more::{Display, Error};
+use rkyv::{Archive, Deserialize, Serialize};
 
 pub use crate::{
     App,
@@ -11,7 +12,7 @@ pub use crate::{
 /// 0 is reserved for the bootstrap
 pub type BackendId = u32;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug, Default)]
 pub struct InodePath {
     segments: Vec<String>,
 }
@@ -19,6 +20,10 @@ pub struct InodePath {
 impl InodePath {
     pub fn pop(&mut self) -> Option<String> {
         self.segments.pop()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.segments.iter().map(String::as_str)
     }
 }
 
