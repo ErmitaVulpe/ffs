@@ -80,7 +80,13 @@ pub struct BackendError<Kind> {
     pub kind: Kind,
 }
 
-#[derive(Debug, Display, Error)]
+impl<Kind> BackendError<Kind> {
+    pub fn inner(&self) -> &Kind {
+        &self.kind
+    }
+}
+
+#[derive(Debug, Display, Error, IsVariant)]
 pub enum UploadError {
     #[display("Backend ran out of space")]
     OutOfSpace,
@@ -89,18 +95,18 @@ pub enum UploadError {
     Other(anyhow::Error),
 }
 
-#[derive(Debug, Display, Error)]
+#[derive(Debug, Display, Error, IsVariant)]
 pub enum ListError {
     Other(anyhow::Error),
 }
 
-#[derive(Debug, Display, Error)]
+#[derive(Debug, Display, Error, IsVariant)]
 pub enum GetError {
     BlobNotFound,
     Other(anyhow::Error),
 }
 
-#[derive(Debug, Display, Error)]
+#[derive(Debug, Display, Error, IsVariant)]
 pub enum DeleteError {
     BlobNotFound,
     Other(anyhow::Error),

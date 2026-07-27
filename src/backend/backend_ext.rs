@@ -5,6 +5,8 @@ use derive_more::{Display, Error, From};
 use indoc::indoc;
 use tokio::task::JoinSet;
 
+use crate::state::State;
+
 use super::*;
 
 /// Helper impls for the `Backend`. Should not be manually implemented, unless
@@ -40,6 +42,15 @@ where
             .max()
             .ok_or(GetLatestStateError::NoState)?;
         Ok(self.get_state(latest_rev).await?)
+    }
+
+    //
+    // --- Setting State
+    //
+    async fn set_state(&self, state: &State) -> Result<(), BackendError<UploadError>> {
+        let rev = state.rev();
+        let buf = rkyv::to_bytes::<rkyv::rancor::Error>(state).unwrap();
+        self.upload(BlobId::Meta(rev), &buf).await
     }
 
     //

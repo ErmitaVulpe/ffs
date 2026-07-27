@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use derive_more::{Constructor, Deref, DerefMut, Display, Error};
+use derive_more::{Constructor, Deref, DerefMut, Display, Error, IsVariant};
 use rkyv::{Archive, Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -142,7 +142,8 @@ impl State {
         let mut actions = Vec::new();
 
         for change in &self.performed_changes {
-            if let StateChange::UploadFile {
+            if let StateChange::UploadFile { // TODO Check for removes to remove the files from
+                                             // actions etc
                 source_file,
                 path: _,
                 file_inode,
@@ -168,7 +169,7 @@ impl State {
     }
 }
 
-#[derive(Debug, Display, Error)]
+#[derive(Debug, Display, Error, IsVariant)]
 pub enum StateError {
     #[display("This state is corrupted")]
     InvalidState,
