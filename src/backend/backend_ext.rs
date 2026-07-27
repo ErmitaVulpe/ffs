@@ -45,26 +45,26 @@ where
     //
     // --- Getting leases
     //
-    async fn get_lease(&self, id: Uuid) -> Result<Vec<u8>, BackendError<GetError>> {
-        self.get(BlobId::Lease(id)).await
-    }
 
     /// returns ids of all the leases listed in the bootstrap
     async fn get_all_lease_ids(
         &self,
-    ) -> Result<impl Iterator<Item = Uuid>, BackendError<ListError>> {
+    ) -> Result<impl Iterator<Item = Uuid> + Send, BackendError<ListError>> {
         Ok(self.list().await?.into_iter().filter_map(|id| match id {
             BlobId::Lease(id) => Some(id),
             _ => None,
         }))
     }
 
-    async fn get_all_leases(
+    async fn get_lease(&self, id: Uuid) -> Result<Vec<u8>, BackendError<GetError>> {
+        self.get(BlobId::Lease(id)).await
+    }
+
+    async fn get_leases(
         self: &Arc<Self>,
+        lease_ids: impl Iterator<Item = Uuid> + Send,
     ) -> Result<BTreeMap<Uuid, Vec<u8>>, BackendError<ListError>> {
-        let mut join_set = self
-            .get_all_lease_ids()
-            .await?
+        let mut join_set = lease_ids
             .map(|id| (id, self.clone()))
             .map(|(id, here_self)| async move {
                 here_self.get(BlobId::Lease(id)).await.map(|buf| (id, buf))
@@ -91,6 +91,12 @@ where
         }
 
         Ok(output)
+    }
+
+    async fn get_all_leases(
+        self: &Arc<Self>,
+    ) -> Result<BTreeMap<Uuid, Vec<u8>>, BackendError<ListError>> {
+        self.get_leases(self.get_all_lease_ids().await?).await
     }
 }
 

@@ -22,7 +22,7 @@ impl InodePath {
         self.segments.pop()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &str> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &str> {
         self.segments.iter().map(String::as_str)
     }
 }
