@@ -8,14 +8,13 @@ use rkyv::{Archive, Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    backend::{BackendKind, BackendStat, BlobId},
-    prelude::InodePath,
+    backend::{BackendKind, BackendStat},
+    prelude::{BackendId, InodePath},
 };
 
 /// 6 hours
 pub const LEASE_DURATION: u64 = 6 * 3600;
 
-pub type BackendId = u32;
 pub type Result<T, E = StateError> = std::result::Result<T, E>;
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, Default)]
@@ -25,7 +24,8 @@ pub struct State {
     file_tree: FileTree,
     backends: BTreeMap<BackendId, BackendMeta>,
     /// A list of changes that when replayed will transform the previous
-    /// revision into the current one
+    /// revision into the current one. Even if a new change undoes an existing
+    /// change, it should not change previous ones
     performed_changes: Vec<StateChange>,
 }
 
@@ -40,6 +40,10 @@ impl State {
 
     pub fn rev(&self) -> u64 {
         self.rev
+    }
+
+    pub fn get_backend(&self, id: BackendId) -> Option<&BackendMeta> {
+        self.backends.get(&id)
     }
 
     pub fn perform_change(&mut self, change: StateChange) -> Result<()> {
@@ -70,7 +74,7 @@ impl State {
                 path,
                 file_inode,
             } => {
-                let file_entry = match self.file_tree.resolve_path_entry(path)? {
+                let file_entry = match self.file_tree.resolve_dir_entry(path.as_slice())? {
                     btree_map::Entry::Vacant(entry) => entry,
                     btree_map::Entry::Occupied(_) => return Err(StateError::FileExists),
                 };
@@ -100,7 +104,7 @@ impl State {
                 self.backends = backends_copy;
             }
             StateChange::RemoveFile(path) => {
-                let tree_entry = match self.file_tree.resolve_path_entry(path)? {
+                let tree_entry = match self.file_tree.resolve_dir_entry(path.as_slice())? {
                     btree_map::Entry::Vacant(_) => return Err(StateError::FileNotFound),
                     btree_map::Entry::Occupied(val) => val,
                 };
@@ -138,34 +142,62 @@ impl State {
     }
 
     pub fn upload_plan(&self) -> UploadPlan {
-        let mut lease = Lease::new();
-        let mut actions = Vec::new();
+        let mut uploading_files = BTreeMap::new();
 
         for change in &self.performed_changes {
-            if let StateChange::UploadFile { // TODO Check for removes to remove the files from
-                                             // actions etc
-                source_file,
-                path: _,
-                file_inode,
-            } = change
-            {
-                let mut offset = 0;
-                for extent in &file_inode.extents {
-                    lease
-                        .blobs
-                        .push(LeaseEntry::new(extent.locator.clone(), extent.length));
-                    actions.push(UploadBlob::new(
-                        extent.locator.clone(),
-                        *source_file,
-                        offset,
-                        extent.length,
-                    ));
-                    offset += extent.length;
+            match change {
+                StateChange::UploadFile {
+                    source_file,
+                    path,
+                    file_inode,
+                } => {
+                    let new_blobs = file_inode
+                        .extents
+                        .iter()
+                        .scan(0, |offset, extent| {
+                            let ret = Some(UploadBlob::new(
+                                extent.locator.clone(),
+                                *source_file,
+                                *offset,
+                                extent.length,
+                            ));
+                            *offset += extent.length;
+                            ret
+                        })
+                        .collect::<Vec<_>>();
+
+                    let res = uploading_files.insert(path, new_blobs);
+                    debug_assert!(res.is_none());
                 }
+                StateChange::RemoveFile(inode_path) => {
+                    uploading_files.remove(inode_path);
+                }
+                _ => {}
             }
         }
 
+        let (lease_entries, actions) = uploading_files
+            .into_values()
+            .flatten()
+            .map(|b| (LeaseEntry::new(b.locator.clone(), b.length), b))
+            .collect::<(Vec<_>, Vec<_>)>();
+        let lease = Lease::new_with_blobs(lease_entries);
         UploadPlan { lease, actions }
+    }
+
+    /// Updates the local state (self) to be correct in respect to the new
+    /// confirmed state (other)
+    pub fn update_by_commited(&mut self, other: &Self) {
+        let commited_changes = other.performed_changes.len();
+        self.performed_changes.drain(..commited_changes);
+    }
+
+    pub fn resolve_dir(&self, path: &InodePath) -> Result<&FileTree> {
+        self.file_tree.resolve_dir(path.as_slice())
+    }
+
+    pub fn resolve_path(&self, path: &InodePath) -> Result<&FileTreeEntry> {
+        self.file_tree.resolve_path(path.as_slice())
     }
 }
 
@@ -196,10 +228,10 @@ pub enum StateError {
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, Default, Deref, DerefMut)]
-struct FileTree(BTreeMap<String, FileTreeEntry>);
+pub struct FileTree(BTreeMap<String, FileTreeEntry>);
 
 impl FileTree {
-    fn resolve_path(&self, path: &InodePath) -> Result<&FileTreeEntry> {
+    fn resolve_dir(&self, path: &[String]) -> Result<&FileTree> {
         let mut cur_dir = self;
         let mut iter = path.iter();
         let len = iter.len();
@@ -210,32 +242,12 @@ impl FileTree {
                 FileTreeEntry::File(_) => return Err(StateError::BrokenPath),
             }
         }
-
-        cur_dir
-            .get(iter.next().ok_or(StateError::PathEmpty)?)
-            .ok_or(StateError::BrokenPath)
+        Ok(cur_dir)
     }
 
-    fn resolve_path_mut(&mut self, path: &InodePath) -> Result<&mut FileTreeEntry> {
-        let mut cur_dir = self;
-        let mut iter = path.iter();
-        let len = iter.len();
-        for seg in iter.by_ref().take(len.saturating_sub(1)) {
-            let next_entry = cur_dir.get_mut(seg).ok_or(StateError::BrokenPath)?;
-            match next_entry {
-                FileTreeEntry::Dir(btree_map) => cur_dir = btree_map,
-                FileTreeEntry::File(_) => return Err(StateError::BrokenPath),
-            }
-        }
-
-        cur_dir
-            .get_mut(iter.next().ok_or(StateError::PathEmpty)?)
-            .ok_or(StateError::BrokenPath)
-    }
-
-    fn resolve_path_entry(
+    fn resolve_dir_entry(
         &mut self,
-        path: &InodePath,
+        path: &[String],
     ) -> Result<btree_map::Entry<'_, String, FileTreeEntry>> {
         let mut cur_dir = self;
         let mut iter = path.iter();
@@ -250,6 +262,16 @@ impl FileTree {
 
         Ok(cur_dir.entry(iter.next().ok_or(StateError::PathEmpty)?.to_owned()))
     }
+
+    fn resolve_path(&self, path: &[String]) -> Result<&FileTreeEntry> {
+        let len = path.len();
+        if len == 0 {
+            return Err(StateError::PathEmpty);
+        }
+
+        let tree = self.resolve_dir(&path[..len - 1])?;
+        tree.get(&path[len - 1]).ok_or(StateError::BrokenPath)
+    }
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
@@ -259,7 +281,7 @@ impl FileTree {
 ))]
 #[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
 #[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
-enum FileTreeEntry {
+pub enum FileTreeEntry {
     Dir(#[rkyv(omit_bounds)] FileTree),
     File(FileInode),
 }
@@ -278,15 +300,8 @@ struct Extent {
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlobLocator {
-    backend_id: BackendId,
-    uuid: Uuid,
-}
-
-impl BlobLocator {
-    fn into_blob_id(self) -> (BackendId, BlobId) {
-        let Self { backend_id, uuid } = self;
-        (backend_id, BlobId::Uuid(uuid))
-    }
+    pub backend_id: BackendId,
+    pub uuid: Uuid,
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
@@ -316,7 +331,7 @@ pub struct Lease {
 }
 
 impl Lease {
-    pub fn new() -> Self {
+    pub fn new_with_blobs(blobs: Vec<LeaseEntry>) -> Self {
         let curr = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time went backwards")
@@ -324,8 +339,12 @@ impl Lease {
 
         Self {
             valid_until_unix: curr + LEASE_DURATION,
-            blobs: Vec::new(),
+            blobs,
         }
+    }
+
+    pub fn new() -> Self {
+        Self::new_with_blobs(Vec::new())
     }
 }
 
@@ -336,14 +355,14 @@ pub struct LeaseEntry {
 }
 
 pub struct UploadPlan {
-    lease: Lease,
-    actions: Vec<UploadBlob>,
+    pub lease: Lease,
+    pub actions: Vec<UploadBlob>,
 }
 
-#[derive(Constructor, Debug)]
+#[derive(Clone, Constructor, Debug)]
 pub struct UploadBlob {
-    locator: BlobLocator,
-    source_file: Uuid,
-    offset: u64,
-    length: u64,
+    pub locator: BlobLocator,
+    pub source_file: Uuid,
+    pub offset: u64,
+    pub length: u64,
 }

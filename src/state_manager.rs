@@ -1,13 +1,25 @@
-use std::{future::pending, sync::Arc, time::Duration};
-
-use derive_more::{Display, Error, IsVariant};
-use tokio::{
-    spawn,
-    sync::{mpsc, oneshot, watch},
-    task::{JoinError, JoinHandle},
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::pending,
+    sync::Arc,
+    time::Duration,
 };
 
-use crate::{AppInner, app_arc::AppArc, state::State};
+use derive_more::{Display, Error, From, IsVariant};
+use tokio::{
+    fs::File,
+    io::{self, AsyncReadExt, AsyncSeekExt},
+    spawn,
+    sync::{mpsc, oneshot, watch},
+    task::{JoinError, JoinHandle, JoinSet},
+};
+
+use crate::{
+    AppInner, GetBackendError,
+    app_arc::AppArc,
+    backend::{BackendError, BackendExt, BlobId, SetStateError, UploadError},
+    state::State,
+};
 
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -102,11 +114,11 @@ async fn state_manager(
             }, if commit_task.is_some() => {
                 let res = res.expect("The commit task got aborted");
 
-                // TODO shrink the new local state changes to fit the new confirmed
-
-                for tx in current_listeners.drain(..) {
-                    let _ = tx.send(res.clone());
-                }
+                app.state
+                    .local
+                    .write()
+                    .await
+                    .update_by_commited(state.commiting_state.as_ref().unwrap());
 
                 if state.commit_is_pending {
                     state.commit_is_pending = false;
@@ -116,6 +128,10 @@ async fn state_manager(
                 }
 
                 let _ = manager_state_tx.send(state.clone());
+
+                for tx in current_listeners.drain(..) {
+                    let _ = tx.send(res.clone());
+                }
             }
 
             // Commit timer firing
@@ -196,10 +212,88 @@ pub enum ManagerCommitState<'a> {
     CommitingAndQueued(&'a State),
 }
 
-// TODO This function should include automatic retries
+// TODO This function should include automatic gc run when out of space
 async fn commit(app: Arc<AppInner>, state: State) -> Result<(), CommitError> {
-    todo!()
+    let upload_plan = state.upload_plan();
+
+    let lease_id = app
+        .bootstrap
+        .set_lease(&upload_plan.lease)
+        .await
+        .map_err(CommitError::AddLease)?;
+    app.state
+        .active_leases
+        .write()
+        .await
+        .inner
+        .insert(lease_id, upload_plan.lease);
+
+    let required_backends = upload_plan
+        .actions
+        .iter()
+        .map(|b| b.locator.backend_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut backends = BTreeMap::new();
+    for backend_id in required_backends {
+        let backend = app.get_backend(backend_id).await?;
+        backends.insert(backend_id, backend);
+    }
+
+    let mut join_set = JoinSet::from_iter(upload_plan.actions.iter().cloned().map(|b| {
+        let app = app.clone();
+        let backend = backends.get(&b.locator.backend_id).unwrap().clone();
+
+        async move {
+            let mut file = File::open(app.tempdir.path().join(b.source_file.to_string()))
+                .await
+                .map_err(CommitError::no_source_file)?;
+            file.seek(std::io::SeekFrom::Start(b.offset)).await?;
+            let mut buf = vec![0u8; b.length as usize];
+            file.read_exact(&mut buf).await?;
+            backend
+                .upload(BlobId::Uuid(b.locator.uuid), &buf)
+                .await
+                .map_err(CommitError::ChunkUpload)?;
+
+            Ok(())
+        }
+    }));
+
+    while let Some(res) = join_set.join_next().await {
+        if let Err(err) = res.expect("Tasks are never cancelled") {
+            join_set.shutdown().await;
+            return Err(err);
+        }
+    }
+
+    app.bootstrap.set_state(&state).await?;
+    Ok(())
 }
 
-#[derive(Clone, Debug, Display, Error)]
-pub enum CommitError {}
+#[derive(Clone, Debug, Display, Error, From)]
+pub enum CommitError {
+    #[display("Failed to initialize a backend")]
+    #[from]
+    GetBackend(GetBackendError),
+    #[display("Failed to register a new lease")]
+    #[from(skip)]
+    AddLease(BackendError<UploadError>),
+    #[display("Tried to upload data from a non existing file")]
+    #[from(skip)]
+    NoSourceFile(Arc<io::Error>),
+    #[display("Failed to upload a chunk")]
+    #[from(skip)]
+    ChunkUpload(BackendError<UploadError>),
+    #[display("Failed to upload local state")]
+    #[from]
+    SetState(SetStateError),
+    #[from(io::Error)]
+    Io(Arc<io::Error>),
+}
+
+impl CommitError {
+    fn no_source_file(e: io::Error) -> Self {
+        Self::NoSourceFile(Arc::new(e))
+    }
+}

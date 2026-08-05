@@ -12,7 +12,7 @@ pub use crate::{
 /// 0 is reserved for the bootstrap
 pub type BackendId = u32;
 
-#[derive(Archive, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Archive, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InodePath {
     segments: Vec<String>,
 }
@@ -24,6 +24,10 @@ impl InodePath {
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &str> {
         self.segments.iter().map(String::as_str)
+    }
+
+    pub fn as_slice(&self) -> &[String] {
+        &self.segments
     }
 }
 

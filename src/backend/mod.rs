@@ -11,7 +11,7 @@ mod backend_ext;
 #[cfg(debug_assertions)]
 mod dummy;
 
-pub use backend_ext::BackendExt;
+pub use backend_ext::{BackendExt, SetStateError};
 
 #[derive(Debug, Display, Error)]
 #[display("Unsupported backend kind")]
@@ -72,7 +72,7 @@ pub struct BackendStat {
 #[display("Failed to read backend stats")]
 pub struct StatError(#[error(source)] anyhow::Error);
 
-#[derive(Constructor, Debug, Display, Error)]
+#[derive(Constructor, Clone, Debug, Display, Error)]
 #[display("Operation on backend with id {backend_id} failed")]
 pub struct BackendError<Kind> {
     pub backend_id: BackendId,
@@ -86,35 +86,37 @@ impl<Kind> BackendError<Kind> {
     }
 }
 
-#[derive(Debug, Display, Error, IsVariant)]
+#[derive(Clone, Debug, Display, Error, IsVariant)]
 pub enum UploadError {
     #[display("Backend ran out of space")]
     OutOfSpace,
     #[display("Blob with given id already exists in this backend")]
     BlobDuplicate,
-    Other(anyhow::Error),
+    Other(Arc<anyhow::Error>),
 }
 
-#[derive(Debug, Display, Error, IsVariant)]
+#[derive(Clone, Debug, Display, Error, IsVariant)]
 pub enum ListError {
-    Other(anyhow::Error),
+    Other(Arc<anyhow::Error>),
 }
 
-#[derive(Debug, Display, Error, IsVariant)]
+#[derive(Clone, Debug, Display, Error, IsVariant)]
 pub enum GetError {
     BlobNotFound,
-    Other(anyhow::Error),
+    Other(Arc<anyhow::Error>),
 }
 
-#[derive(Debug, Display, Error, IsVariant)]
+#[derive(Clone, Debug, Display, Error, IsVariant)]
 pub enum DeleteError {
     BlobNotFound,
-    Other(anyhow::Error),
+    Other(Arc<anyhow::Error>),
 }
 
-#[derive(Debug, Display, Error, From)]
-#[display("Failed to initialize this backend")]
-pub struct InitError(#[error(source)] anyhow::Error);
+#[derive(Clone, Debug, Display, Error, IsVariant)]
+pub enum InitError {
+    BackendRejected,
+    Other(Arc<anyhow::Error>),
+}
 
 /// All data required to init a `dyn Backend`
 #[derive(

@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
+use derive_more::{Display, Error, From, IsVariant};
 use tempfile::TempDir;
 use tokio::{
     fs,
@@ -15,8 +16,12 @@ use uuid::Uuid;
 
 use crate::{
     app_arc::AppArc,
-    backend::{ArchivedBackendKind, Backend, BackendExt, BackendKindSpecifier, BlobId},
-    state::{Lease, LeaseEntry, State},
+    backend::{
+        ArchivedBackendKind, Backend, BackendError, BackendExt, BackendKindSpecifier, BlobId,
+        InitError,
+    },
+    prelude::{BackendId, InodePath},
+    state::{FileTree, Lease, LeaseEntry, State},
     state_manager::StateManagerHandle,
 };
 
@@ -45,10 +50,15 @@ impl App {
             inner: AppInner::init(bootstrap_path).await?,
         })
     }
+
+    pub fn list_dir(&self, path: &InodePath) -> impl Future<Output = state::Result<FileTree>> {
+        self.inner.list_dir(path)
+    }
 }
 
 struct AppInner {
     bootstrap: Arc<dyn Backend>,
+    backends: RwLock<BTreeMap<BackendId, Arc<dyn Backend>>>,
     state: AppState,
     tempdir: TempDir,
 }
@@ -66,6 +76,7 @@ impl AppInner {
 
             AppInner {
                 bootstrap,
+                backends: RwLock::new(BTreeMap::new()),
                 state: AppState::new(confirmed_state, app_arc),
                 tempdir,
             }
@@ -128,6 +139,26 @@ impl AppInner {
         Self::create_helper(bootstrap, initial_state)
     }
 
+    async fn get_backend(&self, id: BackendId) -> Result<Arc<dyn Backend>, GetBackendError> {
+        if let Some(backend) = self.backends.read().await.get(&id) {
+            return Ok(backend.clone());
+        }
+
+        let backend_data = self
+            .state
+            .local
+            .read()
+            .await
+            .get_backend(id)
+            .ok_or(GetBackendError::NoSuchBackend)?
+            .kind
+            .clone();
+
+        let backend = backend::init(id, backend_data).await?;
+        self.backends.write().await.insert(id, backend.clone());
+        Ok(backend)
+    }
+
     async fn refresh_leases(self: &Arc<Self>) -> Result<(), anyhow::Error> {
         let confirmed_ids = self
             .bootstrap
@@ -174,6 +205,18 @@ impl AppInner {
 
         Ok(())
     }
+
+    pub async fn list_dir(&self, path: &InodePath) -> state::Result<FileTree> {
+        self.state.local.read().await.resolve_dir(path).cloned()
+    }
+}
+
+#[derive(Clone, Debug, Display, Error, From, IsVariant)]
+pub enum GetBackendError {
+    #[display("Backend with specified id doesn't exists")]
+    NoSuchBackend,
+    #[display("Failed to initialize a backend")]
+    BackendInit(BackendError<InitError>),
 }
 
 #[derive(Debug)]

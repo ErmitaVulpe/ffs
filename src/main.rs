@@ -22,7 +22,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Run { command } => {
             let app = App::new(&bootstrap_path).await?;
-            todo!();
+            match command {
+                RunSubCommand::Ls { path } => {
+                    let res = app.list_dir(&path.unwrap_or_default()).await;
+                    println!("{res:#?}");
+                }
+                RunSubCommand::Mkdir { path } => todo!(),
+                RunSubCommand::Upload { src, target } => todo!(),
+                RunSubCommand::Rm { path } => todo!(),
+            }
         }
     }
 

@@ -5,7 +5,7 @@ use derive_more::{Display, Error, From};
 use indoc::indoc;
 use tokio::task::JoinSet;
 
-use crate::state::State;
+use crate::state::{Lease, State};
 
 use super::*;
 
@@ -35,11 +35,14 @@ where
         }))
     }
 
+    async fn get_latest_state_rev(&self) -> Result<Option<u64>, BackendError<ListError>> {
+        self.get_state_revs().await.map(|i| i.max())
+    }
+
     async fn get_latest_state(&self) -> Result<Vec<u8>, GetLatestStateError> {
         let latest_rev = self
-            .get_state_revs()
+            .get_latest_state_rev()
             .await?
-            .max()
             .ok_or(GetLatestStateError::NoState)?;
         Ok(self.get_state(latest_rev).await?)
     }
@@ -47,10 +50,20 @@ where
     //
     // --- Setting State
     //
-    async fn set_state(&self, state: &State) -> Result<(), BackendError<UploadError>> {
+    async fn set_state(&self, state: &State) -> Result<(), SetStateError> {
         let rev = state.rev();
+        if self
+            .get_latest_state_rev()
+            .await?
+            .ok_or(SetStateError::NoState)?
+            != rev - 1
+        {
+            return Err(SetStateError::StateOutdated);
+        }
+
         let buf = rkyv::to_bytes::<rkyv::rancor::Error>(state).unwrap();
-        self.upload(BlobId::Meta(rev), &buf).await
+        self.upload(BlobId::Meta(rev), &buf).await?;
+        Ok(())
     }
 
     //
@@ -109,6 +122,16 @@ where
     ) -> Result<BTreeMap<Uuid, Vec<u8>>, BackendError<ListError>> {
         self.get_leases(self.get_all_lease_ids().await?).await
     }
+
+    //
+    // --- Setting leases
+    //
+    async fn set_lease(&self, lease: &Lease) -> Result<Uuid, BackendError<UploadError>> {
+        let uuid = Uuid::new_v4();
+        let buf = rkyv::to_bytes::<rkyv::rancor::Error>(lease).unwrap();
+        self.upload(BlobId::Lease(uuid), &buf).await?;
+        Ok(uuid)
+    }
 }
 
 impl<T: Backend + ?Sized + 'static> BackendExt for T {}
@@ -119,4 +142,25 @@ pub enum GetLatestStateError {
     ListError(BackendError<ListError>),
     #[display("No state revision found")]
     NoState,
+}
+
+#[derive(Clone, Debug, Display, Error, From)]
+pub enum SetStateError {
+    GetError(BackendError<GetError>),
+    ListError(BackendError<ListError>),
+    #[from(skip)]
+    UploadError(BackendError<UploadError>),
+    #[display("No state revision found")]
+    NoState,
+    #[display("A newer state revision already exists on the bootstrap")]
+    StateOutdated,
+}
+
+impl From<BackendError<UploadError>> for SetStateError {
+    fn from(value: BackendError<UploadError>) -> Self {
+        match value.inner() {
+            UploadError::BlobDuplicate => Self::StateOutdated,
+            _ => Self::UploadError(value),
+        }
+    }
 }

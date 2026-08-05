@@ -1,6 +1,7 @@
 use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::Context;
@@ -27,14 +28,14 @@ impl BackendMod for DummyImpl {
         match result {
             Ok(meta) => {
                 if !meta.is_dir() {
-                    return Err(BackendError::new(
-                        id,
-                        InitError(anyhow::anyhow!("Specified path is not a directory")),
-                    ));
+                    return Err(BackendError::new(id, InitError::BackendRejected));
                 }
             }
             Err(e) => {
-                return Err(BackendError::new(id, InitError(anyhow::Error::from(e))));
+                return Err(BackendError::new(
+                    id,
+                    InitError::Other(Arc::new(anyhow::Error::from(e))),
+                ));
             }
         }
 
@@ -109,7 +110,7 @@ impl Backend for DummyBackend {
         let stat = self
             .stat()
             .await
-            .map_err(|e| self.error(UploadError::Other(e.into())))?;
+            .map_err(|e| self.error(UploadError::Other(Arc::new(e.into()))))?;
         if stat.used + data.len() as u64 > stat.total {
             return Err(self.error(UploadError::OutOfSpace));
         }
@@ -121,24 +122,24 @@ impl Backend for DummyBackend {
         let mut file = fs::File::create_new(self.path_for(&id))
             .await
             .context("Failed to create a new chunk file")
-            .map_err(|e| self.error(UploadError::Other(e)))?;
+            .map_err(|e| self.error(UploadError::Other(Arc::new(e))))?;
 
         file.write_all(data)
             .await
-            .map_err(|e| self.error(UploadError::Other(e.into())))
+            .map_err(|e| self.error(UploadError::Other(Arc::new(e.into()))))
     }
 
     async fn list(&self) -> Result<Vec<BlobId>, BackendError<ListError>> {
         let mut read_dir = fs::read_dir(&self.root)
             .await
-            .map_err(|e| self.error(ListError::Other(e.into())))?;
+            .map_err(|e| self.error(ListError::Other(Arc::new(e.into()))))?;
         let mut ids = Vec::new();
 
         loop {
             let res = read_dir
                 .next_entry()
                 .await
-                .map_err(|e| self.error(ListError::Other(e.into())))?;
+                .map_err(|e| self.error(ListError::Other(Arc::new(e.into()))))?;
 
             let Some(entry) = res else {
                 break;
@@ -146,7 +147,8 @@ impl Backend for DummyBackend {
 
             let raw_name = entry.file_name();
             let name = raw_name.to_string_lossy();
-            let id = BlobId::from_str(&name).map_err(|e| self.error(ListError::Other(e.into())))?;
+            let id = BlobId::from_str(&name)
+                .map_err(|e| self.error(ListError::Other(Arc::new(e.into()))))?;
             ids.push(id);
         }
 
@@ -158,7 +160,7 @@ impl Backend for DummyBackend {
             .await
             .map_err(|e| match e.kind() {
                 io::ErrorKind::NotFound => self.error(GetError::BlobNotFound),
-                _ => self.error(GetError::Other(e.into())),
+                _ => self.error(GetError::Other(Arc::new(e.into()))),
             })
     }
 
@@ -167,7 +169,7 @@ impl Backend for DummyBackend {
             .await
             .map_err(|e| match e.kind() {
                 io::ErrorKind::NotFound => self.error(DeleteError::BlobNotFound),
-                _ => self.error(DeleteError::Other(e.into())),
+                _ => self.error(DeleteError::Other(Arc::new(e.into()))),
             })
     }
 }
