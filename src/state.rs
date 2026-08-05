@@ -46,6 +46,10 @@ impl State {
         self.backends.get(&id)
     }
 
+    pub fn backend_stats(&self) -> impl ExactSizeIterator<Item = (&u32, &BackendStat)> {
+        self.backends.iter().map(|(id, meta)| (id, &meta.stat))
+    }
+
     pub fn perform_change(&mut self, change: StateChange) -> Result<()> {
         match &change {
             StateChange::AddedBackend(meta) => {

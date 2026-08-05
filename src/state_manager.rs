@@ -48,6 +48,17 @@ impl StateManagerHandle {
             manager_state_rx,
         }
     }
+
+    pub fn send(
+        &self,
+        command: ManagerCommand,
+    ) -> impl Future<Output = Result<(), mpsc::error::SendError<ManagerCommand>>> {
+        self.command_tx.send(command)
+    }
+
+    pub fn watch_manager_state(&self) -> watch::Receiver<ManagerState> {
+        self.manager_state_rx.clone()
+    }
 }
 
 async fn state_manager(

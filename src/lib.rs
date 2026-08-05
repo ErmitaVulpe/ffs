@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use tokio::{
     fs,
     io::AsyncWriteExt,
-    sync::{RwLock, watch},
+    sync::{RwLock, mpsc, oneshot, watch},
 };
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ use crate::{
     },
     prelude::{BackendId, InodePath},
     state::{FileTree, Lease, LeaseEntry, State},
-    state_manager::StateManagerHandle,
+    state_manager::{ManagerCommand, StateManagerHandle},
 };
 
 mod app_arc;
@@ -53,6 +53,22 @@ impl App {
 
     pub fn list_dir(&self, path: &InodePath) -> impl Future<Output = state::Result<FileTree>> {
         self.inner.list_dir(path)
+    }
+
+    /// Lazy commit that waits for additional commit requests
+    pub fn commit(
+        &self,
+        resp: Option<oneshot::Sender<Result<(), state_manager::CommitError>>>,
+    ) -> impl Future<Output = Result<(), mpsc::error::SendError<ManagerCommand>>> {
+        self.inner.commit(resp)
+    }
+
+    /// Starts commit process immidietely, if no currently ongoing
+    pub fn commit_now(
+        &self,
+        resp: Option<oneshot::Sender<Result<(), state_manager::CommitError>>>,
+    ) -> impl Future<Output = Result<(), mpsc::error::SendError<ManagerCommand>>> {
+        self.inner.commit_now(resp)
     }
 }
 
@@ -208,6 +224,37 @@ impl AppInner {
 
     pub async fn list_dir(&self, path: &InodePath) -> state::Result<FileTree> {
         self.state.local.read().await.resolve_dir(path).cloned()
+    }
+
+    /// Lazy commit that waits for additional commit requests
+    pub fn commit(
+        &self,
+        resp: Option<oneshot::Sender<Result<(), state_manager::CommitError>>>,
+    ) -> impl Future<Output = Result<(), mpsc::error::SendError<ManagerCommand>>> {
+        self.state.state_manager.send(ManagerCommand::enqueue(resp))
+    }
+
+    /// Starts commit process immidietely, if no currently ongoing
+    pub fn commit_now(
+        &self,
+        resp: Option<oneshot::Sender<Result<(), state_manager::CommitError>>>,
+    ) -> impl Future<Output = Result<(), mpsc::error::SendError<ManagerCommand>>> {
+        self.state
+            .state_manager
+            .send(ManagerCommand::start_now(resp))
+    }
+
+    pub async fn upload_file(&self, file_path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let file_cache_id = Uuid::new_v4();
+        let len = fs::copy(
+            file_path,
+            self.tempdir.path().join(file_cache_id.to_string()),
+        )
+        .await?;
+
+        // TODO some kind of blob allocator
+
+        todo!()
     }
 }
 
